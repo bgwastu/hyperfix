@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">HyperFix</string>
-    <string name="app_desc">Fixes HyperOS text selection crash &amp; screenshot in Work Profile</string>
+    <string name="app_desc">Fixes HyperOS text selection crash, screenshot &amp; recents app names in Work Profile</string>
 </resources>

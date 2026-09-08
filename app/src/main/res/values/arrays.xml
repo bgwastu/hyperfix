@@ -4,5 +4,7 @@
         <item>system</item>
         <item>android</item>
         <item>com.miui.screenshot</item>
+        <item>com.mi.android.globallauncher</item>
+        <item>com.miui.home</item>
     </string-array>
 </resources>
