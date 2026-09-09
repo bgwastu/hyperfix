@@ -17,6 +17,9 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.lang.ref.WeakReference;
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
 import android.os.Binder;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -26,6 +29,8 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class MainHook implements IXposedHookLoadPackage {
+    private static final Set<Object> sWorkTiles = Collections.synchronizedSet(Collections.newSetFromMap(new java.util.WeakHashMap<Object, Boolean>()));
+    private static volatile boolean sWorkTileReceiverRegistered = false;
 
     public static class ClearIdentityHook extends XC_MethodHook {
         private static final ThreadLocal<Long> tokenHolder = new ThreadLocal<Long>();
@@ -455,6 +460,32 @@ public class MainHook implements IXposedHookLoadPackage {
                                                         XposedHelpers.setObjectField(param.thisObject, "mUserContext", workContext);
                                                         XposedHelpers.setIntField(param.thisObject, "mUser", uhId);
                                                         XposedBridge.log("[HyperFix] CustomTile redirected to Work Profile: " + component + " -> " + uh);
+                                                        sWorkTiles.add(param.thisObject);
+                                                        if (!sWorkTileReceiverRegistered && context != null) {
+                                                            sWorkTileReceiverRegistered = true;
+                                                            IntentFilter filter = new IntentFilter();
+                                                            filter.addAction(Intent.ACTION_MANAGED_PROFILE_AVAILABLE);
+                                                            filter.addAction(Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE);
+                                                            try {
+                                                                Context regCtx = context.getApplicationContext() != null ? context.getApplicationContext() : context;
+                                                                regCtx.registerReceiver(new BroadcastReceiver() {
+                                                                    @Override
+                                                                    public void onReceive(Context ctx, Intent it) {
+                                                                        XposedBridge.log("[HyperFix] Managed profile state changed: " + it.getAction());
+                                                                        synchronized (sWorkTiles) {
+                                                                            for (Object tile : sWorkTiles) {
+                                                                                try {
+                                                                                    XposedHelpers.callMethod(tile, "refreshState");
+                                                                                } catch (Throwable ignored) {}
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }, filter, Context.RECEIVER_EXPORTED);
+                                                                XposedBridge.log("[HyperFix] Registered MANAGED_PROFILE receiver for QS tiles");
+                                                            } catch (Throwable t) {
+                                                                XposedBridge.log("[HyperFix] Failed to register receiver: " + t.getMessage());
+                                                            }
+                                                        }
                                                         break;
                                                     } catch (Throwable ignored) {}
                                                 }
@@ -481,14 +512,55 @@ public class MainHook implements IXposedHookLoadPackage {
                             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                                 int user = XposedHelpers.getIntField(param.thisObject, "mUser");
                                 if (user != 0) {
+                                    sWorkTiles.add(param.thisObject);
+                                    Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                    boolean isQuiet = false;
+                                    if (context != null) {
+                                        UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
+                                        if (um != null) {
+                                            try {
+                                                UserHandle uh = (UserHandle) XposedHelpers.callStaticMethod(UserHandle.class, "of", user);
+                                                isQuiet = ((Boolean) XposedHelpers.callMethod(um, "isQuietModeEnabled", uh)).booleanValue()
+                                                    || !((Boolean) XposedHelpers.callMethod(um, "isUserRunning", uh)).booleanValue();
+                                            } catch (Throwable ignored) {}
+                                        }
+                                    }
                                     Object state = param.args[0];
                                     if (state != null) {
+                                        if (isQuiet) {
+                                            XposedHelpers.setIntField(state, "state", 0); // STATE_UNAVAILABLE
+                                        }
                                         CharSequence currentLabel = (CharSequence) XposedHelpers.getObjectField(state, "label");
                                         if (currentLabel != null) {
                                             String s = currentLabel.toString();
                                             if (!s.startsWith("[WORK] ")) {
                                                 XposedHelpers.setObjectField(state, "label", "[WORK] " + s);
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    if ("handleClick".equals(m.getName())) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                int user = XposedHelpers.getIntField(param.thisObject, "mUser");
+                                if (user != 0) {
+                                    Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                    if (context != null) {
+                                        UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
+                                        if (um != null) {
+                                            try {
+                                                UserHandle uh = (UserHandle) XposedHelpers.callStaticMethod(UserHandle.class, "of", user);
+                                                boolean isQuiet = ((Boolean) XposedHelpers.callMethod(um, "isQuietModeEnabled", uh)).booleanValue()
+                                                    || !((Boolean) XposedHelpers.callMethod(um, "isUserRunning", uh)).booleanValue();
+                                                if (isQuiet) {
+                                                    XposedBridge.log("[HyperFix] Blocked click because Work Profile is paused");
+                                                    param.setResult(null);
+                                                }
+                                            } catch (Throwable ignored) {}
                                         }
                                     }
                                 }
