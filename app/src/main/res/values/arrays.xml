@@ -7,5 +7,6 @@
         <item>com.mi.android.globallauncher</item>
         <item>com.miui.home</item>
         <item>com.android.phone</item>
+        <item>com.android.systemui</item>
     </string-array>
 </resources>
