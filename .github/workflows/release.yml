@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -15,6 +17,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -32,8 +36,24 @@ jobs:
       - name: Prepare APK
         run: cp app/build/outputs/apk/release/app-release.apk HyperFix.apk
 
+      - name: Determine Tag and Release Name
+        id: release_info
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            RELEASE_NAME="${TAG_NAME}"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TAG_NAME="commit-${SHORT_SHA}"
+            RELEASE_NAME="HyperFix (${SHORT_SHA})"
+          fi
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "release_name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          name: ${{ steps.release_info.outputs.release_name }}
           files: HyperFix.apk
           generate_release_notes: true
