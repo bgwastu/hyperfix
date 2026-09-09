@@ -1,14 +1,20 @@
 # HyperFix
 
-An Xposed / LSPosed module designed to fix specific Xiaomi HyperOS bugs (HyperOS 2.0 / 3.0 on Android 14–16), primarily around Work Profile and system integration.
+An Xposed / LSPosed module designed to fix specific Xiaomi HyperOS bugs (HyperOS 2.0 / 3.0 on Android 14–16), primarily around Work Profile, Quick Settings, and system integration.
 
-Tested on: **POCO X8 Pro Max (HyperOS 3.0 / Android 16)**
+Tested on: **Xiaomi HyperOS 2.0 / 3.0 (Android 15–16)**
 
 ## Features
 
 - **Work Profile Text Selection Crash:** Fixes text selection force close / `SecurityException` in Work Profile when accessibility services are enabled.
 - **Work Profile Screenshot "Couldn't Save":** Fixes HyperOS screenshot failure in Work Profile.
 - **Launcher Recents Work Profile App Names:** Fixes missing/blank app titles in POCO / HyperOS System Launcher Recents for apps installed only in Work Profile.
+- **Work Profile Quick Settings Tiles:**
+  - Enables discovery of Quick Settings tiles for apps installed exclusively in Work Profile (hidden by default in HyperOS / AOSP).
+  - Automatically prepends `[WORK] ` prefix to Work Profile tiles for clear distinction in the status bar and edit sheet.
+  - Fixes lifecycle binding so tile services run directly inside their Work Profile container.
+  - Fixes SystemUI crash when long-pressing Work Profile tiles by routing App Info launches into the target user.
+- **Telephony Radio Mode Switching:** Allows companion network tools to toggle between 5G and forced 4G in-process without `SecurityException`.
 
 ## Installation
 
@@ -21,6 +27,8 @@ Tested on: **POCO X8 Pro Max (HyperOS 3.0 / Android 16)**
 2. Install the APK.
 3. Open LSPosed / Vector, enable **HyperFix**, and ensure the following scopes are checked:
    - **System Framework** (`android` / `system`)
+   - **System UI** (`com.android.systemui`)
+   - **Phone** (`com.android.phone`)
    - **Screenshot** (`com.miui.screenshot`)
    - **System / POCO Launcher** (`com.mi.android.globallauncher` / `com.miui.home`)
-4. Reboot your phone or restart the launcher (`pkill -f com.mi.android.globallauncher`).
+4. Reboot your phone or restart the respective system processes.
