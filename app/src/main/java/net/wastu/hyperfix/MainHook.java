@@ -151,5 +151,57 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking PackageManagerWrapper: " + t.getMessage());
             }
         }
+
+        // 4. Allow FiveGTile to toggle network modes without SecurityException
+        if ("com.android.phone".equals(lpparam.packageName)) {
+            XposedBridge.log("[HyperFix] Hooking com.android.phone for PhoneInterfaceManager");
+            try {
+                XC_MethodHook bypassHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        int callingUid = Binder.getCallingUid();
+                        Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mApp");
+                        if (context != null) {
+                            String[] packages = context.getPackageManager().getPackagesForUid(callingUid);
+                            if (packages != null) {
+                                for (String pkg : packages) {
+                                    if ("net.wastu.fivegtile".equals(pkg)) {
+                                        long token = Binder.clearCallingIdentity();
+                                        try {
+                                            param.setResult(XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args));
+                                        } finally {
+                                            Binder.restoreCallingIdentity(token);
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+
+                XposedHelpers.findAndHookMethod(
+                    "com.android.phone.PhoneInterfaceManager",
+                    lpparam.classLoader,
+                    "getAllowedNetworkTypesForReason",
+                    int.class,
+                    int.class,
+                    bypassHook
+                );
+
+                XposedHelpers.findAndHookMethod(
+                    "com.android.phone.PhoneInterfaceManager",
+                    lpparam.classLoader,
+                    "setAllowedNetworkTypesForReason",
+                    int.class,
+                    int.class,
+                    long.class,
+                    bypassHook
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked PhoneInterfaceManager for FiveGTile");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking PhoneInterfaceManager: " + t.getMessage());
+            }
+        }
     }
 }
