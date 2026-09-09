@@ -545,39 +545,45 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking TileLifecycleManager.setBindService: " + t.getMessage());
             }
 
-            // D. Fix Long Click crash for Work Profile tiles (launch in Work Profile instead of User 0)
+            // D. Route Long Click and activity launches for Work Profile packages to the Work Profile UserHandle
             try {
                 XposedHelpers.findAndHookMethod(
-                    "com.android.systemui.qs.tileimpl.QSTileImpl",
+                    "com.android.systemui.statusbar.phone.LegacyActivityStarterInternalImpl",
                     lpparam.classLoader,
-                    "handleLongClick",
-                    "com.android.systemui.animation.Expandable",
+                    "getActivityUserHandle",
+                    Intent.class,
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            Class<?> customTileClass = XposedHelpers.findClass(
-                                "com.android.systemui.qs.external.CustomTile", lpparam.classLoader
-                            );
-                            if (customTileClass.isInstance(param.thisObject)) {
-                                int user = XposedHelpers.getIntField(param.thisObject, "mUser");
-                                if (user != 0) {
-                                    ComponentName cn = (ComponentName) XposedHelpers.getObjectField(param.thisObject, "mComponent");
-                                    Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
-                                    if (cn != null && context != null) {
-                                        UserHandle uh = (UserHandle) XposedHelpers.callStaticMethod(UserHandle.class, "of", user);
-                                        Intent intent = new Intent("android.settings.APPLICATION_DETAILS_SETTINGS");
-                                        intent.setData(Uri.fromParts("package", cn.getPackageName(), null));
-                                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                                        try {
-                                            XposedHelpers.callMethod(context, "startActivityAsUser", intent, uh);
-                                            Object activityStarter = XposedHelpers.getObjectField(param.thisObject, "mActivityStarter");
-                                            if (activityStarter != null) {
-                                                XposedHelpers.callMethod(activityStarter, "postStartActivityDismissingKeyguard", (Intent) null, 0);
+                            Intent intent = (Intent) param.args[0];
+                            if (intent == null) return;
+                            String pkg = null;
+                            if (intent.getComponent() != null) {
+                                pkg = intent.getComponent().getPackageName();
+                            } else if (intent.getPackage() != null) {
+                                pkg = intent.getPackage();
+                            } else if (intent.getData() != null && "package".equals(intent.getData().getScheme())) {
+                                pkg = intent.getData().getSchemeSpecificPart();
+                            }
+                            if (pkg != null) {
+                                Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "context");
+                                if (context != null) {
+                                    try {
+                                        context.getPackageManager().getPackageInfo(pkg, 0);
+                                    } catch (PackageManager.NameNotFoundException e) {
+                                        UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
+                                        if (um != null) {
+                                            for (UserHandle uh : um.getUserProfiles()) {
+                                                int uhId = ((Integer) XposedHelpers.callMethod(uh, "getIdentifier")).intValue();
+                                                if (uhId != 0) {
+                                                    try {
+                                                        XposedHelpers.callMethod(context.getPackageManager(), "getPackageInfoAsUser", pkg, 0, uhId);
+                                                        param.setResult(uh);
+                                                        XposedBridge.log("[HyperFix] getActivityUserHandle routed " + pkg + " to Work Profile: " + uh);
+                                                        return;
+                                                    } catch (Throwable ignored) {}
+                                                }
                                             }
-                                            XposedBridge.log("[HyperFix] Launched App Details in Work Profile for: " + cn);
-                                            param.setResult(null); // Consumed, prevent User 0 crash
-                                        } catch (Throwable t) {
-                                            XposedBridge.log("[HyperFix] Error starting activity as user " + user + ": " + t.getMessage());
                                         }
                                     }
                                 }
@@ -585,9 +591,9 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                     }
                 );
-                XposedBridge.log("[HyperFix] Successfully hooked QSTileImpl.handleLongClick for Work Profile");
+                XposedBridge.log("[HyperFix] Successfully hooked LegacyActivityStarterInternalImpl.getActivityUserHandle");
             } catch (Throwable t) {
-                XposedBridge.log("[HyperFix] Error hooking QSTileImpl.handleLongClick: " + t.getMessage());
+                XposedBridge.log("[HyperFix] Error hooking LegacyActivityStarterInternalImpl: " + t.getMessage());
             }
         }
     }
