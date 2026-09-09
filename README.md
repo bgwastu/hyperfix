@@ -17,6 +17,7 @@ Tested on: **Xiaomi HyperOS 2.0 / 3.0 (Android 15–16)**
   - Automatically disables and dims Work Profile tiles when Work Profile is paused (quiet mode) or stopped.
 - **Cross-Profile Link & Intent Sharing ("Blocked by your IT admin" Fix):** Fixes the IT admin block screen when attempting to open web links or deep links in Work Profile apps from the Personal profile by dynamically authorizing cross-profile intent forwarding in `PackageManagerService` for users within the same profile group.
 - **Telephony Radio Mode Switching:** Allows companion network tools to toggle between 5G and forced 4G in-process without `SecurityException`.
+- **AOSP Cached Apps Freezer Enabler:** Bypasses HyperOS's proprietary PowerMillet override to permanently enable Android's native Linux cgroup v2 cached apps freezer in ActivityManager, preventing idle background apps from draining battery and CPU.
 
 ## Installation
 

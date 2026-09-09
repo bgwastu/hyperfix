@@ -175,6 +175,60 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking ComputerEngine.canForwardTo: " + t.getMessage());
             }
+
+            // Force AOSP cgroup v2 cached apps freezer in CachedAppOptimizer
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "android.os.SystemProperties",
+                    lpparam.classLoader,
+                    "getBoolean",
+                    String.class,
+                    boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            if ("persist.sys.powmillet.enable".equals(param.args[0])) {
+                                param.setResult(false);
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked SystemProperties for powmillet");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking SystemProperties: " + t.getMessage());
+            }
+
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.server.am.CachedAppOptimizer",
+                    lpparam.classLoader,
+                    "updateUseFreezer",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                Object am = XposedHelpers.getObjectField(param.thisObject, "mAm");
+                                if (am != null) {
+                                    Context ctx = (Context) XposedHelpers.getObjectField(am, "mContext");
+                                    if (ctx != null) {
+                                        android.provider.Settings.Global.putString(
+                                            ctx.getContentResolver(), "cached_apps_freezer", "enabled"
+                                        );
+                                    }
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            boolean isFreezerActive = XposedHelpers.getBooleanField(param.thisObject, "mUseFreezer");
+                            XposedBridge.log("[HyperFix] CachedAppOptimizer.updateUseFreezer finished (mUseFreezer=" + isFreezerActive + ")");
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked CachedAppOptimizer.updateUseFreezer");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking CachedAppOptimizer.updateUseFreezer: " + t.getMessage());
+            }
         }
 
         // 3. Fix Recents Work Profile app labels in Launcher
