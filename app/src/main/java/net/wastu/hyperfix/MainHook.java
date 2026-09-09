@@ -5,8 +5,12 @@ import android.content.ComponentName;
 import android.content.pm.ActivityInfo;
 import android.os.UserHandle;
 import android.content.Intent;
+import android.net.Uri;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.pm.ApplicationInfo;
+import android.content.res.Resources;
+import android.graphics.drawable.Drawable;
 import android.os.UserManager;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -224,8 +228,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         Intent intent = (Intent) param.args[0];
                         if (intent != null && "android.service.quicksettings.action.QS_TILE".equals(intent.getAction())) {
+                            XposedBridge.log("[HyperFix] queryIntentServicesAsUser called with args: " + java.util.Arrays.toString(param.args) + " for intent: " + intent);
                             Object userArg = param.args[2];
-                            int currentUserId = (userArg instanceof Number) ? ((Number) userArg).intValue() : 0;
+                            int currentUserId = (userArg instanceof Number) ? ((Number) userArg).intValue() : (userArg instanceof UserHandle ? ((Integer) XposedHelpers.callMethod(userArg, "getIdentifier")).intValue() : 0);
                             Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
                             if (context == null) return;
 
@@ -257,6 +262,13 @@ public class MainHook implements IXposedHookLoadPackage {
                                                     String key = wr.serviceInfo.packageName + "/" + wr.serviceInfo.name;
                                                     if (!seen.contains(key)) {
                                                         seen.add(key);
+                                                        try {
+                                                            CharSequence orig = wr.serviceInfo.loadLabel((PackageManager) param.thisObject);
+                                                            String labelStr = orig != null ? orig.toString() : wr.serviceInfo.name;
+                                                            if (!labelStr.startsWith("[WORK] ")) {
+                                                                wr.serviceInfo.nonLocalizedLabel = "[WORK] " + labelStr;
+                                                            }
+                                                        } catch (Throwable ignored) {}
                                                         merged.add(wr);
                                                         XposedBridge.log("[HyperFix] Discovered Work Profile QS_TILE: " + key + " (u" + pId + ")");
                                                     }
@@ -284,6 +296,139 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking queryIntentServicesAsUser: " + t.getMessage());
             }
 
+            // Hook getComponentEnabledSetting to treat Work Profile tiles as enabled
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "android.app.ApplicationPackageManager",
+                    lpparam.classLoader,
+                    "getComponentEnabledSetting",
+                    ComponentName.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            ComponentName cn = (ComponentName) param.args[0];
+                            if (cn != null) {
+                                Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                if (context != null) {
+                                    PackageManager pm = context.getPackageManager();
+                                    try {
+                                        pm.getPackageInfo(cn.getPackageName(), 0);
+                                    } catch (PackageManager.NameNotFoundException e) {
+                                        UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
+                                        if (um != null) {
+                                            for (UserHandle uh : um.getUserProfiles()) {
+                                                int uhId = ((Integer) XposedHelpers.callMethod(uh, "getIdentifier")).intValue();
+                                                if (uhId != 0) {
+                                                    try {
+                                                        XposedHelpers.callMethod(pm, "getPackageInfoAsUser", cn.getPackageName(), 0, uhId);
+                                                        param.setResult(PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
+                                                        return;
+                                                    } catch (Throwable ignored) {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked getComponentEnabledSetting");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking getComponentEnabledSetting: " + t.getMessage());
+            }
+
+            // Hook getResourcesForApplication to load resources for Work Profile apps
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "android.app.ApplicationPackageManager",
+                    lpparam.classLoader,
+                    "getResourcesForApplication",
+                    ApplicationInfo.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            ApplicationInfo ai = (ApplicationInfo) param.args[0];
+                            if (ai != null) {
+                                Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                if (context != null) {
+                                    PackageManager pm = context.getPackageManager();
+                                    try {
+                                        pm.getPackageInfo(ai.packageName, 0);
+                                    } catch (PackageManager.NameNotFoundException e) {
+                                        UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
+                                        if (um != null) {
+                                            for (UserHandle uh : um.getUserProfiles()) {
+                                                int uhId = ((Integer) XposedHelpers.callMethod(uh, "getIdentifier")).intValue();
+                                                if (uhId != 0) {
+                                                    try {
+                                                        Context workContext = (Context) XposedHelpers.callMethod(context, "createPackageContextAsUser", "android", 0, uh);
+                                                        Resources res = (Resources) XposedHelpers.callMethod(workContext.getPackageManager(), "getResourcesForApplication", ai);
+                                                        if (res != null) {
+                                                            param.setResult(res);
+                                                            return;
+                                                        }
+                                                    } catch (Throwable ignored) {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked getResourcesForApplication");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking getResourcesForApplication: " + t.getMessage());
+            }
+
+            // Hook getDrawable to load icons for Work Profile apps
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "android.app.ApplicationPackageManager",
+                    lpparam.classLoader,
+                    "getDrawable",
+                    String.class,
+                    int.class,
+                    ApplicationInfo.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            String pkg = (String) param.args[0];
+                            int resid = (Integer) param.args[1];
+                            ApplicationInfo ai = (ApplicationInfo) param.args[2];
+                            Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                            if (context != null && pkg != null) {
+                                PackageManager pm = context.getPackageManager();
+                                try {
+                                    pm.getPackageInfo(pkg, 0);
+                                } catch (PackageManager.NameNotFoundException e) {
+                                    UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
+                                    if (um != null) {
+                                        for (UserHandle uh : um.getUserProfiles()) {
+                                            int uhId = ((Integer) XposedHelpers.callMethod(uh, "getIdentifier")).intValue();
+                                            if (uhId != 0) {
+                                                try {
+                                                    Context workContext = (Context) XposedHelpers.callMethod(context, "createPackageContextAsUser", "android", 0, uh);
+                                                    Drawable d = (Drawable) XposedHelpers.callMethod(workContext.getPackageManager(), "getDrawable", pkg, resid, ai);
+                                                    if (d != null) {
+                                                        param.setResult(d);
+                                                        return;
+                                                    }
+                                                } catch (Throwable ignored) {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked getDrawable");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking getDrawable: " + t.getMessage());
+            }
             // B. Redirect CustomTile User & Context to Work Profile
             try {
                 XposedBridge.hookAllConstructors(
@@ -324,6 +469,36 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Successfully hooked CustomTile constructor");
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking CustomTile constructor: " + t.getMessage());
+            }
+
+            // Hook CustomTile.handleUpdateState to add [WORK] prefix to tile label
+            try {
+                Class<?> customTileClass = XposedHelpers.findClass("com.android.systemui.qs.external.CustomTile", lpparam.classLoader);
+                for (java.lang.reflect.Method m : customTileClass.getDeclaredMethods()) {
+                    if ("handleUpdateState".equals(m.getName())) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                int user = XposedHelpers.getIntField(param.thisObject, "mUser");
+                                if (user != 0) {
+                                    Object state = param.args[0];
+                                    if (state != null) {
+                                        CharSequence currentLabel = (CharSequence) XposedHelpers.getObjectField(state, "label");
+                                        if (currentLabel != null) {
+                                            String s = currentLabel.toString();
+                                            if (!s.startsWith("[WORK] ")) {
+                                                XposedHelpers.setObjectField(state, "label", "[WORK] " + s);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                XposedBridge.log("[HyperFix] Successfully hooked CustomTile.handleUpdateState for [WORK] prefix");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking CustomTile.handleUpdateState: " + t.getMessage());
             }
 
             // C. Redirect TileLifecycleManager service binding to Work Profile user
@@ -368,6 +543,51 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Successfully hooked TileLifecycleManager.setBindService");
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking TileLifecycleManager.setBindService: " + t.getMessage());
+            }
+
+            // D. Fix Long Click crash for Work Profile tiles (launch in Work Profile instead of User 0)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.systemui.qs.tileimpl.QSTileImpl",
+                    lpparam.classLoader,
+                    "handleLongClick",
+                    "com.android.systemui.animation.Expandable",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            Class<?> customTileClass = XposedHelpers.findClass(
+                                "com.android.systemui.qs.external.CustomTile", lpparam.classLoader
+                            );
+                            if (customTileClass.isInstance(param.thisObject)) {
+                                int user = XposedHelpers.getIntField(param.thisObject, "mUser");
+                                if (user != 0) {
+                                    ComponentName cn = (ComponentName) XposedHelpers.getObjectField(param.thisObject, "mComponent");
+                                    Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                    if (cn != null && context != null) {
+                                        UserHandle uh = (UserHandle) XposedHelpers.callStaticMethod(UserHandle.class, "of", user);
+                                        Intent intent = new Intent("android.settings.APPLICATION_DETAILS_SETTINGS");
+                                        intent.setData(Uri.fromParts("package", cn.getPackageName(), null));
+                                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                        try {
+                                            XposedHelpers.callMethod(context, "startActivityAsUser", intent, uh);
+                                            Object activityStarter = XposedHelpers.getObjectField(param.thisObject, "mActivityStarter");
+                                            if (activityStarter != null) {
+                                                XposedHelpers.callMethod(activityStarter, "postStartActivityDismissingKeyguard", (Intent) null, 0);
+                                            }
+                                            XposedBridge.log("[HyperFix] Launched App Details in Work Profile for: " + cn);
+                                            param.setResult(null); // Consumed, prevent User 0 crash
+                                        } catch (Throwable t) {
+                                            XposedBridge.log("[HyperFix] Error starting activity as user " + user + ": " + t.getMessage());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked QSTileImpl.handleLongClick for Work Profile");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking QSTileImpl.handleLongClick: " + t.getMessage());
             }
         }
     }
