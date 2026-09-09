@@ -14,6 +14,8 @@ Tested on: **Xiaomi HyperOS 2.0 / 3.0 (Android 15–16)**
   - Automatically prepends `[WORK] ` prefix to Work Profile tiles for clear distinction in the status bar and edit sheet.
   - Fixes lifecycle binding so tile services run directly inside their Work Profile container.
   - Fixes SystemUI crash when long-pressing Work Profile tiles by routing App Info launches into the target user.
+  - Automatically disables and dims Work Profile tiles when Work Profile is paused (quiet mode) or stopped.
+- **Cross-Profile Link & Intent Sharing ("Blocked by your IT admin" Fix):** Fixes the IT admin block screen when attempting to open web links or deep links in Work Profile apps from the Personal profile by dynamically authorizing cross-profile intent forwarding in `PackageManagerService` for users within the same profile group.
 - **Telephony Radio Mode Switching:** Allows companion network tools to toggle between 5G and forced 4G in-process without `SecurityException`.
 
 ## Installation

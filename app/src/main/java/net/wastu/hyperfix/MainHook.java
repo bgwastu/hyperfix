@@ -101,6 +101,80 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking AccessibilitySecurityPolicy: " + t.getMessage());
             }
+
+            // Fix Cross-Profile Intent Forwarding ("Blocked by your IT admin") for Work Profiles
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.server.pm.ComputerEngine",
+                    lpparam.classLoader,
+                    "canForwardTo",
+                    Intent.class,
+                    String.class,
+                    int.class,
+                    int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            boolean original = ((Boolean) param.getResult()).booleanValue();
+                            if (original) return; // already allowed
+
+                            int sourceUserId = ((Integer) param.args[2]).intValue();
+                            int targetUserId = ((Integer) param.args[3]).intValue();
+                            if (sourceUserId == targetUserId) return;
+
+                            Object userManager = XposedHelpers.getObjectField(param.thisObject, "mUserManager");
+                            if (userManager != null) {
+                                boolean sameProfile = ((Boolean) XposedHelpers.callMethod(
+                                    userManager, "isSameProfileGroup", sourceUserId, targetUserId
+                                )).booleanValue();
+                                if (sameProfile) {
+                                    Intent intent = (Intent) param.args[0];
+                                    String resolvedType = (String) param.args[1];
+                                    long token = Binder.clearCallingIdentity();
+                                    try {
+                                        @SuppressWarnings("unchecked")
+                                        List<ResolveInfo> list = (List<ResolveInfo>) XposedHelpers.callMethod(
+                                            param.thisObject,
+                                            "queryIntentActivitiesInternal",
+                                            intent,
+                                            resolvedType,
+                                            65536L, // MATCH_DEFAULT_ONLY
+                                            targetUserId
+                                        );
+                                        if (list == null || list.isEmpty()) {
+                                            list = (List<ResolveInfo>) XposedHelpers.callMethod(
+                                                param.thisObject,
+                                                "queryIntentActivitiesInternal",
+                                                intent,
+                                                resolvedType,
+                                                0L,
+                                                targetUserId
+                                            );
+                                        }
+                                        if (list != null) {
+                                            for (ResolveInfo ri : list) {
+                                                if (ri.activityInfo != null && !"android".equals(ri.activityInfo.packageName)) {
+                                                    XposedBridge.log("[HyperFix] canForwardTo enabled for profile group: u"
+                                                        + sourceUserId + " -> u" + targetUserId + " intent: " + intent);
+                                                    param.setResult(true);
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    } catch (Throwable t) {
+                                        XposedBridge.log("[HyperFix] Error checking queryIntentActivitiesInternal: " + t.getMessage());
+                                    } finally {
+                                        Binder.restoreCallingIdentity(token);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked ComputerEngine.canForwardTo");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking ComputerEngine.canForwardTo: " + t.getMessage());
+            }
         }
 
         // 3. Fix Recents Work Profile app labels in Launcher
