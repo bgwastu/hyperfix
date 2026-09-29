@@ -26,10 +26,27 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+    signingConfigs {
+        val keystorePath = System.getenv("ANDROID_KEYSTORE_FILE")
+        val keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+        val keystoreAlias = System.getenv("ANDROID_KEYSTORE_ALIAS")
+
+        if (!keystorePath.isNullOrBlank() && !keystorePassword.isNullOrBlank() && !keystoreAlias.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = keystorePassword
+                keyAlias = keystoreAlias
+                keyPassword = keystorePassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfigs.findByName("release")?.let { signingConfig = it } ?: run {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
         }
     }
 }
