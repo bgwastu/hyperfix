@@ -57,3 +57,4 @@ jobs:
           name: ${{ steps.release_info.outputs.release_name }}
           files: HyperFix.apk
           generate_release_notes: true
+          make_latest: true

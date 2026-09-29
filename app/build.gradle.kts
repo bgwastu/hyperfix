@@ -1,3 +1,11 @@
+val gitVersionCode = providers.exec {
+    commandLine("git", "rev-list", "--count", "HEAD")
+}.standardOutput.asText.map { it.trim().toIntOrNull() ?: 1 }
+
+val gitVersionName = providers.exec {
+    commandLine("git", "describe", "--tags", "--always")
+}.standardOutput.asText.map { it.trim() }
+
 plugins {
     id("com.android.application")
 }
@@ -10,8 +18,8 @@ android {
         applicationId = "net.wastu.hyperfix"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = gitVersionCode.get()
+        versionName = gitVersionName.get()
     }
 
     compileOptions {
