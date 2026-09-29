@@ -68,6 +68,21 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking MediaUtils.j: " + t.getMessage());
             }
 
+            // Modern HyperOS (Android 15-16): MediaUtils.i(Context) -> returns UserInfo (null = defaults to User 0 MediaStore)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.miui.screenshot.util.MediaUtils",
+                    lpparam.classLoader,
+                    "i",
+                    Context.class,
+                    XC_MethodReplacement.returnConstant(null)
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked MediaUtils.i(Context)");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking MediaUtils.i(Context): " + t.getMessage());
+            }
+
+            // Legacy MIUI fallback: MediaUtils.i(UserInfo, boolean) -> returns int (0)
             try {
                 XposedHelpers.findAndHookMethod(
                     "com.miui.screenshot.util.MediaUtils",
@@ -77,9 +92,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     boolean.class,
                     XC_MethodReplacement.returnConstant(0)
                 );
-                XposedBridge.log("[HyperFix] Successfully hooked MediaUtils.i");
+                XposedBridge.log("[HyperFix] Successfully hooked legacy MediaUtils.i(UserInfo, boolean)");
             } catch (Throwable t) {
-                XposedBridge.log("[HyperFix] Error hooking MediaUtils.i: " + t.getMessage());
+                // Ignore if legacy signature is not present
             }
         }
 
