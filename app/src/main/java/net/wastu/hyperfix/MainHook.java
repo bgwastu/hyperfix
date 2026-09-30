@@ -24,7 +24,10 @@ import android.database.Cursor;
 import android.database.CursorWrapper;
 import android.media.ExifInterface;
 import android.os.Binder;
+import android.os.Handler;
+import android.os.Looper;
 import android.webkit.MimeTypeMap;
+import android.widget.Toast;
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.lang.reflect.Field;
@@ -148,6 +151,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     }
                                     f.set(param.thisObject, sanitized);
                                     XposedBridge.log("[HyperFix] Sanitized screenshot filename template: " + f.getName() + " -> " + sanitized);
+                                    showToast("📸 HyperFix: Screenshot sanitized\n(App package removed)");
                                 }
                             }
                         }
@@ -1014,7 +1018,17 @@ public class MainHook implements IXposedHookLoadPackage {
             public String getString(int columnIndex) {
                 if (columnIndex >= 0) {
                     if (columnIndex == mDisplayNameCol) {
-                        return computeGenericName(cursor, uri, true);
+                        String genericName = computeGenericName(cursor, uri, true);
+                        String origName = null;
+                        try {
+                            origName = super.getString(columnIndex);
+                        } catch (Throwable ignored) {}
+                        if (origName != null && !origName.equals(genericName)) {
+                            showToast("🔒 HyperFix: Anonymized filename\n" + origName + " ➔ " + genericName);
+                        } else {
+                            showToast("🔒 HyperFix: Anonymized filename ➔ " + genericName);
+                        }
+                        return genericName;
                     } else if (columnIndex == mTitleCol) {
                         return computeGenericName(cursor, uri, false);
                     }
@@ -1110,13 +1124,29 @@ public class MainHook implements IXposedHookLoadPackage {
 
             ExifInterface ex = new ExifInterface(fd);
             List<Long> ranges = new ArrayList<Long>();
+            List<String> redactedNames = new ArrayList<String>();
+
+            // Check if GPS tags were present (these are redacted by AOSP RedactionUtils)
+            if (ex.getAttribute("GPSLatitude") != null || ex.getAttribute("GPSLongitude") != null || ex.getAttribute("GPSAltitude") != null) {
+                redactedNames.add("GPS");
+            }
+
             for (String tag : EXTRA_SENSITIVE_EXIF_TAGS) {
                 long[] r = ex.getAttributeRange(tag);
                 if (r != null && r.length == 2 && r[1] > 0) {
                     ranges.add(r[0]);
                     ranges.add(r[0] + r[1]);
+                    redactedNames.add(tag);
                 }
             }
+
+            if (!redactedNames.isEmpty()) {
+                String detail = String.join(", ", redactedNames);
+                showToast("🛡️ HyperFix: Redacted " + redactedNames.size() + " EXIF tag" + (redactedNames.size() > 1 ? "s" : "") + "\n(" + detail + ")");
+            } else {
+                showToast("🛡️ HyperFix: EXIF clean (0 sensitive tags)");
+            }
+
             if (ranges.isEmpty()) {
                 return null;
             }
@@ -1129,5 +1159,45 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log("[HyperFix] Error extracting extra sensitive EXIF ranges: " + t.getMessage());
             return null;
         }
+    }
+
+    private static volatile long sLastToastTime = 0;
+    private static volatile String sLastToastMsg = "";
+
+    private static void showToast(final String message) {
+        long now = System.currentTimeMillis();
+        synchronized (MainHook.class) {
+            if (message.equals(sLastToastMsg) && (now - sLastToastTime < 3000)) {
+                return;
+            }
+            sLastToastTime = now;
+            sLastToastMsg = message;
+        }
+
+        try {
+            Context targetCtx = null;
+            try {
+                targetCtx = (Context) XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("android.app.ActivityThread", null),
+                    "currentApplication"
+                );
+            } catch (Throwable ignored) {}
+
+            if (targetCtx != null) {
+                final Context appCtx = targetCtx.getApplicationContext() != null
+                        ? targetCtx.getApplicationContext()
+                        : targetCtx;
+                new Handler(Looper.getMainLooper()).post(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            Toast.makeText(appCtx, message, Toast.LENGTH_SHORT).show();
+                        } catch (Throwable t) {
+                            XposedBridge.log("[HyperFix] Toast failed: " + t.getMessage());
+                        }
+                    }
+                });
+            }
+        } catch (Throwable ignored) {}
     }
 }
