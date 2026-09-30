@@ -22,6 +22,11 @@ import android.content.BroadcastReceiver;
 import android.content.IntentFilter;
 import android.database.Cursor;
 import android.database.CursorWrapper;
+import android.database.CrossProcessCursorWrapper;
+import android.database.CursorWindow;
+import android.database.DatabaseUtils;
+import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.media.ExifInterface;
 import android.os.Binder;
 import android.os.Handler;
@@ -943,39 +948,96 @@ public class MainHook implements IXposedHookLoadPackage {
                 || "com.google.android.providers.media.module".equals(lpparam.packageName)) {
             XposedBridge.log("[HyperFix] Hooking MediaProvider / PhotoPicker in " + lpparam.packageName);
 
-            // A. Generic Filenames for Photo Picker queries
+            // A. Generic Filenames for Photo Picker & MediaProvider queries
             try {
-                XposedHelpers.findAndHookMethod(
-                    "com.android.providers.media.PickerUriResolver",
-                    lpparam.classLoader,
-                    "query",
-                    Uri.class,
-                    String[].class,
-                    int.class,
-                    int.class,
-                    String.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            Cursor cursor = (Cursor) param.getResult();
-                            if (cursor == null) return;
+                XC_MethodHook wrapCursorHook = new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Cursor cursor = (Cursor) param.getResult();
+                        if (cursor == null) return;
 
-                            int callingUid = (Integer) param.args[3];
-                            String callingPkg = (String) param.args[4];
-                            if (callingUid <= 10000 && callingUid != 0) return;
+                        int callingUid = Binder.getCallingUid();
+                        if (param.args.length >= 4 && param.args[3] instanceof Integer) {
+                            callingUid = ((Integer) param.args[3]).intValue();
+                        }
+                        if (callingUid <= 10000 && callingUid != 0) return;
+
+                        String callingPkg = null;
+                        try {
+                            callingPkg = (String) XposedHelpers.callMethod(param.thisObject, "getCallingPackage");
+                        } catch (Throwable ignored) {}
+
+                        if (callingPkg == null && param.args.length >= 5 && param.args[4] instanceof String) {
+                            callingPkg = (String) param.args[4];
+                        }
+
+                        if (callingPkg != null) {
                             if ("com.android.photopicker".equals(callingPkg)
-                                    || "com.google.android.photopicker".equals(callingPkg)) {
+                                    || "com.google.android.photopicker".equals(callingPkg)
+                                    || "com.android.providers.media.module".equals(callingPkg)
+                                    || "com.miui.gallery".equals(callingPkg)
+                                    || "com.google.android.apps.photos".equals(callingPkg)
+                                    || callingPkg.contains("gallery")) {
                                 return;
                             }
-
-                            Uri uri = (Uri) param.args[0];
-                            param.setResult(wrapPickerCursor(cursor, uri));
                         }
+
+                        Uri uri = (Uri) param.args[0];
+                        param.setResult(wrapPickerCursor(cursor, uri));
                     }
-                );
-                XposedBridge.log("[HyperFix] Successfully hooked PickerUriResolver.query for generic names");
+                };
+
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        "com.android.providers.media.PickerUriResolver",
+                        lpparam.classLoader,
+                        "query",
+                        Uri.class,
+                        String[].class,
+                        int.class,
+                        int.class,
+                        String.class,
+                        wrapCursorHook
+                    );
+                    XposedBridge.log("[HyperFix] Successfully hooked PickerUriResolver.query for generic names");
+                } catch (Throwable t) {
+                    XposedBridge.log("[HyperFix] Error hooking PickerUriResolver.query: " + t.getMessage());
+                }
+
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        "com.android.providers.media.MediaProvider",
+                        lpparam.classLoader,
+                        "query",
+                        Uri.class,
+                        String[].class,
+                        Bundle.class,
+                        CancellationSignal.class,
+                        wrapCursorHook
+                    );
+                    XposedBridge.log("[HyperFix] Successfully hooked MediaProvider.query(Uri, String[], Bundle, CancellationSignal)");
+                } catch (Throwable t) {
+                    XposedBridge.log("[HyperFix] Error hooking MediaProvider.query(Bundle): " + t.getMessage());
+                }
+
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        "com.android.providers.media.MediaProvider",
+                        lpparam.classLoader,
+                        "query",
+                        Uri.class,
+                        String[].class,
+                        String.class,
+                        String[].class,
+                        String.class,
+                        wrapCursorHook
+                    );
+                    XposedBridge.log("[HyperFix] Successfully hooked MediaProvider.query(5 args)");
+                } catch (Throwable t) {
+                    XposedBridge.log("[HyperFix] Error hooking MediaProvider.query(5 args): " + t.getMessage());
+                }
             } catch (Throwable t) {
-                XposedBridge.log("[HyperFix] Error hooking PickerUriResolver.query: " + t.getMessage());
+                XposedBridge.log("[HyperFix] Error setting up generic filename query hooks: " + t.getMessage());
             }
 
             // B. Force Redaction for Third-Party Apps
@@ -1191,19 +1253,53 @@ public class MainHook implements IXposedHookLoadPackage {
     };
 
     private static Cursor wrapPickerCursor(final Cursor cursor, final Uri uri) {
-        return new CursorWrapper(cursor) {
+        return new CrossProcessCursorWrapper(cursor) {
             private final int mDisplayNameCol = cursor.getColumnIndex("_display_name");
             private final int mTitleCol = cursor.getColumnIndex("title");
+            private final int mDataCol = cursor.getColumnIndex("_data");
+
+            @Override
+            public CursorWindow getWindow() {
+                return null;
+            }
+
+            @Override
+            public void fillWindow(int position, CursorWindow window) {
+                try {
+                    XposedHelpers.callStaticMethod(DatabaseUtils.class, "cursorFillWindow", this, position, window);
+                } catch (Throwable t) {
+                    super.fillWindow(position, window);
+                }
+            }
 
             @Override
             public String getString(int columnIndex) {
                 if (columnIndex >= 0) {
                     if (columnIndex == mDisplayNameCol) {
-                        String genericName = computeGenericName(cursor, uri, true);
-                        notifyFilenameAnonymized(genericName);
+                        String origName = null;
+                        try {
+                            origName = super.getString(mDisplayNameCol);
+                        } catch (Throwable ignored) {}
+                        String genericName = computeGenericName(this, uri, origName, true);
+                        if (getCount() <= 1) {
+                            notifyFilenameAnonymized(genericName);
+                        }
                         return genericName;
                     } else if (columnIndex == mTitleCol) {
-                        return computeGenericName(cursor, uri, false);
+                        return computeGenericName(this, uri, null, false);
+                    } else if (columnIndex == mDataCol) {
+                        String origData = null;
+                        try {
+                            origData = super.getString(columnIndex);
+                        } catch (Throwable ignored) {}
+                        if (origData != null) {
+                            int lastSlash = origData.lastIndexOf('/');
+                            if (lastSlash >= 0) {
+                                String origName = origData.substring(lastSlash + 1);
+                                String genericName = computeGenericName(this, uri, origName, true);
+                                return origData.substring(0, lastSlash + 1) + genericName;
+                            }
+                        }
                     }
                 }
                 return super.getString(columnIndex);
@@ -1211,7 +1307,7 @@ public class MainHook implements IXposedHookLoadPackage {
         };
     }
 
-    private static String computeGenericName(Cursor cursor, Uri uri, boolean withExtension) {
+    private static String computeGenericName(Cursor cursor, Uri uri, String origName, boolean withExtension) {
         String id = null;
         try {
             int idIdx = cursor.getColumnIndex("_id");
@@ -1250,18 +1346,12 @@ public class MainHook implements IXposedHookLoadPackage {
         }
 
         String ext = null;
-        try {
-            int nameIdx = cursor.getColumnIndex("_display_name");
-            if (nameIdx >= 0) {
-                String origName = cursor.getString(nameIdx);
-                if (origName != null) {
-                    int dot = origName.lastIndexOf('.');
-                    if (dot >= 0 && dot < origName.length() - 1) {
-                        ext = origName.substring(dot + 1).toLowerCase();
-                    }
-                }
+        if (origName != null) {
+            int dot = origName.lastIndexOf('.');
+            if (dot >= 0 && dot < origName.length() - 1) {
+                ext = origName.substring(dot + 1).toLowerCase();
             }
-        } catch (Throwable ignored) {}
+        }
 
         if (ext == null || ext.isEmpty()) {
             if (mime != null) {
