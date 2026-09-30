@@ -151,7 +151,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     }
                                     f.set(param.thisObject, sanitized);
                                     XposedBridge.log("[HyperFix] Sanitized screenshot filename template: " + f.getName() + " -> " + sanitized);
-                                    showToast("📸 HyperFix: Screenshot sanitized\n(App package removed)");
+                                    showToast("📸 Screenshot sanitized");
                                 }
                             }
                         }
@@ -1200,15 +1200,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (columnIndex >= 0) {
                     if (columnIndex == mDisplayNameCol) {
                         String genericName = computeGenericName(cursor, uri, true);
-                        String origName = null;
-                        try {
-                            origName = super.getString(columnIndex);
-                        } catch (Throwable ignored) {}
-                        if (origName != null && !origName.equals(genericName)) {
-                            showToast("🔒 HyperFix: Anonymized filename\n" + origName + " ➔ " + genericName);
-                        } else {
-                            showToast("🔒 HyperFix: Anonymized filename ➔ " + genericName);
-                        }
+                        notifyFilenameAnonymized(genericName);
                         return genericName;
                     } else if (columnIndex == mTitleCol) {
                         return computeGenericName(cursor, uri, false);
@@ -1321,12 +1313,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             }
 
-            if (!redactedNames.isEmpty()) {
-                String detail = String.join(", ", redactedNames);
-                showToast("🛡️ HyperFix: Redacted " + redactedNames.size() + " EXIF tag" + (redactedNames.size() > 1 ? "s" : "") + "\n(" + detail + ")");
-            } else {
-                showToast("🛡️ HyperFix: EXIF clean (0 sensitive tags)");
-            }
+            notifyExifChecked(redactedNames);
 
             if (ranges.isEmpty()) {
                 return null;
@@ -1342,13 +1329,89 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    private static final Object sMediaPrivacyLock = new Object();
+    private static String sPendingFilename = null;
+    private static List<String> sPendingExifTags = null;
+    private static boolean sHasExifCheck = false;
+    private static Runnable sMediaPrivacyRunnable = null;
+
+    private static void notifyFilenameAnonymized(final String genericName) {
+        synchronized (sMediaPrivacyLock) {
+            sPendingFilename = genericName;
+            scheduleMediaPrivacyToastLocked();
+        }
+    }
+
+    private static void notifyExifChecked(final List<String> redactedTags) {
+        synchronized (sMediaPrivacyLock) {
+            sPendingExifTags = redactedTags != null ? new ArrayList<String>(redactedTags) : null;
+            sHasExifCheck = true;
+            scheduleMediaPrivacyToastLocked();
+        }
+    }
+
+    private static void scheduleMediaPrivacyToastLocked() {
+        if (sMediaPrivacyRunnable != null) {
+            return;
+        }
+        sMediaPrivacyRunnable = new Runnable() {
+            @Override
+            public void run() {
+                String filename;
+                List<String> tags;
+                boolean hadExif;
+                synchronized (sMediaPrivacyLock) {
+                    filename = sPendingFilename;
+                    tags = sPendingExifTags;
+                    hadExif = sHasExifCheck;
+                    sPendingFilename = null;
+                    sPendingExifTags = null;
+                    sHasExifCheck = false;
+                    sMediaPrivacyRunnable = null;
+                }
+
+                StringBuilder sb = new StringBuilder();
+                if (filename != null) {
+                    sb.append("🔒 ").append(filename);
+                }
+                if (hadExif) {
+                    if (sb.length() > 0) sb.append("\n");
+                    if (tags != null && !tags.isEmpty()) {
+                        sb.append("🛡️ Redacted ").append(tags.size()).append(" EXIF (").append(String.join(", ", tags)).append(")");
+                    } else {
+                        sb.append("🛡️ EXIF clean");
+                    }
+                }
+
+                if (sb.length() > 0) {
+                    showToast(sb.toString());
+                }
+            }
+        };
+
+        try {
+            Looper mainLooper = Looper.getMainLooper();
+            if (mainLooper != null) {
+                new Handler(mainLooper).postDelayed(sMediaPrivacyRunnable, 300);
+            } else {
+                sMediaPrivacyRunnable.run();
+            }
+        } catch (Throwable t) {
+            sMediaPrivacyRunnable.run();
+        }
+    }
+
     private static volatile long sLastToastTime = 0;
     private static volatile String sLastToastMsg = "";
 
     private static void showToast(final String message) {
+        if (message == null || message.isEmpty()) return;
         long now = System.currentTimeMillis();
         synchronized (MainHook.class) {
-            if (message.equals(sLastToastMsg) && (now - sLastToastTime < 3000)) {
+            if (now - sLastToastTime < 2000) {
+                return;
+            }
+            if (message.equals(sLastToastMsg) && (now - sLastToastTime < 4000)) {
                 return;
             }
             sLastToastTime = now;
