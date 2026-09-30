@@ -955,35 +955,52 @@ public class MainHook implements IXposedHookLoadPackage {
 
             // C. Sensitive EXIF Stripping (Preserving Orientation)
             try {
-                XposedHelpers.findAndHookMethod(
+                Class<?> redactionUtilsClass = XposedHelpers.findClass(
                     "com.android.providers.media.util.RedactionUtils",
-                    lpparam.classLoader,
-                    "getRedactionRanges",
-                    FileInputStream.class,
-                    String.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            FileInputStream fis = (FileInputStream) param.args[0];
-                            String mimeType = (String) param.args[1];
-                            if (fis == null || mimeType == null) return;
+                    lpparam.classLoader
+                );
+                XC_MethodHook redactionHook = new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        FileInputStream fis = null;
+                        String mimeType = null;
+                        if (param.args.length == 2 && param.args[0] instanceof FileInputStream) {
+                            fis = (FileInputStream) param.args[0];
+                            mimeType = (String) param.args[1];
+                        } else if (param.args.length == 1 && param.args[0] instanceof java.io.File) {
+                            java.io.File f = (java.io.File) param.args[0];
+                            if (f != null && f.exists()) {
+                                try {
+                                    fis = new FileInputStream(f);
+                                    mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                                        MimeTypeMap.getFileExtensionFromUrl(f.getAbsolutePath())
+                                    );
+                                } catch (Throwable ignored) {}
+                            }
+                        }
+                        if (fis == null || mimeType == null) return;
 
-                            long[] origRanges = (long[]) param.getResult();
-                            long[] extraRanges = getExtraSensitiveExifRanges(fis, mimeType);
-                            if (extraRanges != null && extraRanges.length > 0) {
-                                if (origRanges == null || origRanges.length == 0) {
-                                    param.setResult(extraRanges);
-                                } else {
-                                    long[] merged = new long[origRanges.length + extraRanges.length];
-                                    System.arraycopy(origRanges, 0, merged, 0, origRanges.length);
-                                    System.arraycopy(extraRanges, 0, merged, origRanges.length, extraRanges.length);
-                                    param.setResult(merged);
-                                }
+                        long[] origRanges = (long[]) param.getResult();
+                        long[] extraRanges = getExtraSensitiveExifRanges(fis, mimeType);
+                        if (extraRanges != null && extraRanges.length > 0) {
+                            if (origRanges == null || origRanges.length == 0) {
+                                param.setResult(extraRanges);
+                            } else {
+                                long[] merged = new long[origRanges.length + extraRanges.length];
+                                System.arraycopy(origRanges, 0, merged, 0, origRanges.length);
+                                System.arraycopy(extraRanges, 0, merged, origRanges.length, extraRanges.length);
+                                param.setResult(merged);
                             }
                         }
                     }
-                );
-                XposedBridge.log("[HyperFix] Successfully hooked RedactionUtils.getRedactionRanges for sensitive EXIF redaction");
+                };
+
+                for (java.lang.reflect.Method m : redactionUtilsClass.getDeclaredMethods()) {
+                    if ("getRedactionRanges".equals(m.getName())) {
+                        XposedBridge.hookMethod(m, redactionHook);
+                        XposedBridge.log("[HyperFix] Successfully hooked RedactionUtils." + m.getName() + " with " + m.getParameterTypes().length + " params");
+                    }
+                }
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking RedactionUtils.getRedactionRanges: " + t.getMessage());
             }
