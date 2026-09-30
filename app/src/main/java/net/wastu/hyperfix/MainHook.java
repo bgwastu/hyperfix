@@ -190,7 +190,28 @@ public class MainHook implements IXposedHookLoadPackage {
                     int.class,
                     int.class,
                     int.class,
-                    new ClearIdentityHook()
+                    new XC_MethodHook() {
+                        private final ThreadLocal<Long> tokenHolder = new ThreadLocal<Long>();
+
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            tokenHolder.set(Binder.clearCallingIdentity());
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            Long token = tokenHolder.get();
+                            if (token != null) {
+                                Binder.restoreCallingIdentity(token.longValue());
+                                tokenHolder.remove();
+                            }
+                            if (param.hasThrowable()) {
+                                XposedBridge.log("[HyperFix] Suppressed exception in resolveValidReportedPackageLocked: " + param.getThrowable().getMessage());
+                                CharSequence pkg = (CharSequence) param.args[0];
+                                param.setResult(pkg != null ? pkg.toString() : null);
+                            }
+                        }
+                    }
                 );
                 XposedBridge.log("[HyperFix] Successfully hooked AccessibilitySecurityPolicy.resolveValidReportedPackageLocked");
             } catch (Throwable t) {
@@ -323,6 +344,30 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Successfully hooked CachedAppOptimizer.updateUseFreezer");
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking CachedAppOptimizer.updateUseFreezer: " + t.getMessage());
+            }
+
+            // Stop HyperOS from hijacking ACTION_OPEN_DOCUMENT to com.android.fileexplorer
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.server.wm.ActivityTaskManagerServiceImpl",
+                    lpparam.classLoader,
+                    "mayReferToFileExplore",
+                    Intent.class,
+                    String.class,
+                    new XC_MethodReplacement() {
+                        @Override
+                        protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+                            Intent intent = (Intent) param.args[0];
+                            if (intent != null && "android.intent.action.OPEN_DOCUMENT".equals(intent.getAction())) {
+                                XposedBridge.log("[HyperFix] Prevented mayReferToFileExplore hijacking for: " + intent);
+                            }
+                            return param.args[0];
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked ActivityTaskManagerServiceImpl.mayReferToFileExplore");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking ActivityTaskManagerServiceImpl.mayReferToFileExplore: " + t.getMessage());
             }
         }
 
@@ -1003,6 +1048,98 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking RedactionUtils.getRedactionRanges: " + t.getMessage());
+            }
+        }
+
+        // 7. Fix Cross-User / Work Profile Photo Picker in com.android.photopicker
+        if ("com.android.photopicker".equals(lpparam.packageName)) {
+            XposedBridge.log("[HyperFix] Hooking com.android.photopicker");
+
+            // A. In User 11 (Work Profile), redirect ContentResolver queries to User 0 so personal photos are visible
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.photopicker.core.ApplicationModule",
+                    lpparam.classLoader,
+                    "provideContentResolver",
+                    Context.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            Context context = (Context) param.args[0];
+                            if (context != null) {
+                                int userId = ((Integer) XposedHelpers.callMethod(context, "getUserId")).intValue();
+                                if (userId != 0) {
+                                    try {
+                                        UserHandle systemUser = (UserHandle) XposedHelpers.getStaticObjectField(UserHandle.class, "SYSTEM");
+                                        Context user0Context = (Context) XposedHelpers.callMethod(
+                                            context,
+                                            "createPackageContextAsUser",
+                                            "android",
+                                            0,
+                                            systemUser
+                                        );
+                                        if (user0Context != null) {
+                                            param.setResult(user0Context.getContentResolver());
+                                            XposedBridge.log("[HyperFix] ApplicationModule.provideContentResolver redirected to User 0");
+                                        }
+                                    } catch (Throwable t) {
+                                        XposedBridge.log("[HyperFix] Failed to redirect provideContentResolver: " + t.getMessage());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked ApplicationModule.provideContentResolver");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking ApplicationModule.provideContentResolver: " + t.getMessage());
+            }
+
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.photopicker.extensions.ContextKt",
+                    lpparam.classLoader,
+                    "getContentResolverForUser$default",
+                    Context.class,
+                    UserHandle.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            UserHandle uh = (UserHandle) param.args[1];
+                            if (uh != null) {
+                                int uhId = ((Integer) XposedHelpers.callMethod(uh, "getIdentifier")).intValue();
+                                if (uhId != 0) {
+                                    UserHandle systemUser = (UserHandle) XposedHelpers.getStaticObjectField(UserHandle.class, "SYSTEM");
+                                    param.args[1] = systemUser;
+                                    XposedBridge.log("[HyperFix] ContextKt.getContentResolverForUser$default redirected from u" + uhId + " to User 0");
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked ContextKt.getContentResolverForUser$default");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking ContextKt.getContentResolverForUser$default: " + t.getMessage());
+            }
+
+            // B. Restore DocumentsUI for "Browse" / "More" instead of crashing with com.android.fileexplorer
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.photopicker.hyper.HyperMainActivity",
+                    lpparam.classLoader,
+                    "getHyperFilePickerName",
+                    new XC_MethodReplacement() {
+                        @Override
+                        protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+                            ComponentName comp = (ComponentName) XposedHelpers.callMethod(param.thisObject, "getDocumentssUiComponentName");
+                            XposedBridge.log("[HyperFix] getHyperFilePickerName redirected to DocumentsUI: " + comp);
+                            return comp;
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked HyperMainActivity.getHyperFilePickerName");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking HyperMainActivity.getHyperFilePickerName: " + t.getMessage());
             }
         }
     }
