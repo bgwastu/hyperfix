@@ -20,7 +20,14 @@ import java.util.Set;
 import java.lang.ref.WeakReference;
 import android.content.BroadcastReceiver;
 import android.content.IntentFilter;
+import android.database.Cursor;
+import android.database.CursorWrapper;
+import android.media.ExifInterface;
 import android.os.Binder;
+import android.webkit.MimeTypeMap;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
+import java.lang.reflect.Field;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
@@ -95,6 +102,75 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Successfully hooked legacy MediaUtils.i(UserInfo, boolean)");
             } catch (Throwable t) {
                 // Ignore if legacy signature is not present
+            }
+
+            // Sanitize Screenshot Filenames: Strip foreground app package name from filenames
+            try {
+                XC_MethodReplacement emptyStringReplacement = XC_MethodReplacement.returnConstant("");
+                XposedHelpers.findAndHookMethod(
+                    "com.miui.screenshot.util.Util",
+                    lpparam.classLoader,
+                    "h",
+                    Context.class,
+                    boolean.class,
+                    emptyStringReplacement
+                );
+                XposedHelpers.findAndHookMethod(
+                    "com.miui.screenshot.util.Util",
+                    lpparam.classLoader,
+                    "i",
+                    Context.class,
+                    boolean.class,
+                    emptyStringReplacement
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked Util.h and Util.i to strip package names from screenshots");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking Util.h/Util.i: " + t.getMessage());
+            }
+
+            try {
+                XC_MethodHook sanitizeFormatHook = new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Field[] fields = param.thisObject.getClass().getDeclaredFields();
+                        for (Field f : fields) {
+                            if (f.getType() == String.class) {
+                                f.setAccessible(true);
+                                String val = (String) f.get(param.thisObject);
+                                if (val != null && val.contains("Screenshot_") && val.contains("%s_%s")) {
+                                    String sanitized;
+                                    if (val.contains(".png")) {
+                                        sanitized = "Screenshot_%s.png";
+                                    } else if (val.contains(".webp")) {
+                                        sanitized = "Screenshot_%s.webp";
+                                    } else {
+                                        sanitized = "Screenshot_%s.jpg";
+                                    }
+                                    f.set(param.thisObject, sanitized);
+                                    XposedBridge.log("[HyperFix] Sanitized screenshot filename template: " + f.getName() + " -> " + sanitized);
+                                }
+                            }
+                        }
+                    }
+                };
+
+                try {
+                    Class<?> hClass = XposedHelpers.findClass("com.miui.screenshot.H", lpparam.classLoader);
+                    XposedBridge.hookAllConstructors(hClass, sanitizeFormatHook);
+                    XposedBridge.log("[HyperFix] Successfully hooked com.miui.screenshot.H constructor");
+                } catch (Throwable t) {
+                    XposedBridge.log("[HyperFix] Could not hook com.miui.screenshot.H: " + t.getMessage());
+                }
+
+                try {
+                    Class<?> asyncClass = XposedHelpers.findClass("com.miui.annotation.app.AsyncTaskC0326d", lpparam.classLoader);
+                    XposedBridge.hookAllConstructors(asyncClass, sanitizeFormatHook);
+                    XposedBridge.log("[HyperFix] Successfully hooked AsyncTaskC0326d constructor");
+                } catch (Throwable t) {
+                    XposedBridge.log("[HyperFix] Could not hook AsyncTaskC0326d: " + t.getMessage());
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking screenshot constructors: " + t.getMessage());
             }
         }
 
@@ -810,6 +886,248 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking LegacyActivityStarterInternalImpl: " + t.getMessage());
             }
+        }
+
+        // 6. System-wide Photo Picker Injection & Media Privacy
+        if ("com.android.providers.media.module".equals(lpparam.packageName)
+                || "com.android.providers.media".equals(lpparam.packageName)
+                || "com.google.android.providers.media.module".equals(lpparam.packageName)) {
+            XposedBridge.log("[HyperFix] Hooking MediaProvider / PhotoPicker in " + lpparam.packageName);
+
+            // A. Generic Filenames for Photo Picker queries
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.providers.media.PickerUriResolver",
+                    lpparam.classLoader,
+                    "query",
+                    Uri.class,
+                    String[].class,
+                    int.class,
+                    int.class,
+                    String.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            Cursor cursor = (Cursor) param.getResult();
+                            if (cursor == null) return;
+
+                            int callingUid = (Integer) param.args[3];
+                            String callingPkg = (String) param.args[4];
+                            if (callingUid <= 10000 && callingUid != 0) return;
+                            if ("com.android.photopicker".equals(callingPkg)
+                                    || "com.google.android.photopicker".equals(callingPkg)) {
+                                return;
+                            }
+
+                            Uri uri = (Uri) param.args[0];
+                            param.setResult(wrapPickerCursor(cursor, uri));
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked PickerUriResolver.query for generic names");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking PickerUriResolver.query: " + t.getMessage());
+            }
+
+            // B. Force Redaction for Third-Party Apps
+            try {
+                Class<?> pendingOpenInfoClass = XposedHelpers.findClass(
+                    "com.android.providers.media.MediaProvider$PendingOpenInfo",
+                    lpparam.classLoader
+                );
+                XposedBridge.hookAllConstructors(pendingOpenInfoClass, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        int uid = (Integer) param.args[0];
+                        if (uid > 10000 && uid != android.os.Process.myUid()) {
+                            param.args[2] = true; // force shouldRedact = true
+                        }
+                    }
+                });
+                XposedBridge.log("[HyperFix] Successfully hooked MediaProvider$PendingOpenInfo constructor for forced redaction");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking PendingOpenInfo constructor: " + t.getMessage());
+            }
+
+            // C. Sensitive EXIF Stripping (Preserving Orientation)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.providers.media.util.RedactionUtils",
+                    lpparam.classLoader,
+                    "getRedactionRanges",
+                    FileInputStream.class,
+                    String.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            FileInputStream fis = (FileInputStream) param.args[0];
+                            String mimeType = (String) param.args[1];
+                            if (fis == null || mimeType == null) return;
+
+                            long[] origRanges = (long[]) param.getResult();
+                            long[] extraRanges = getExtraSensitiveExifRanges(fis, mimeType);
+                            if (extraRanges != null && extraRanges.length > 0) {
+                                if (origRanges == null || origRanges.length == 0) {
+                                    param.setResult(extraRanges);
+                                } else {
+                                    long[] merged = new long[origRanges.length + extraRanges.length];
+                                    System.arraycopy(origRanges, 0, merged, 0, origRanges.length);
+                                    System.arraycopy(extraRanges, 0, merged, origRanges.length, extraRanges.length);
+                                    param.setResult(merged);
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked RedactionUtils.getRedactionRanges for sensitive EXIF redaction");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking RedactionUtils.getRedactionRanges: " + t.getMessage());
+            }
+        }
+    }
+
+    private static final String[] EXTRA_SENSITIVE_EXIF_TAGS = new String[] {
+        "Make",
+        "Model",
+        "Software",
+        "BodySerialNumber",
+        "CameraOwnerName",
+        "DeviceSettingDescription",
+        "ImageUniqueID",
+        "LensMake",
+        "LensModel",
+        "LensSerialNumber",
+        "LensSpecification",
+        "OwnerName",
+        "SpectralSensitivity",
+        "UserComment",
+        "Artist",
+        "Copyright"
+    };
+
+    private static Cursor wrapPickerCursor(final Cursor cursor, final Uri uri) {
+        return new CursorWrapper(cursor) {
+            private final int mDisplayNameCol = cursor.getColumnIndex("_display_name");
+            private final int mTitleCol = cursor.getColumnIndex("title");
+
+            @Override
+            public String getString(int columnIndex) {
+                if (columnIndex >= 0) {
+                    if (columnIndex == mDisplayNameCol) {
+                        return computeGenericName(cursor, uri, true);
+                    } else if (columnIndex == mTitleCol) {
+                        return computeGenericName(cursor, uri, false);
+                    }
+                }
+                return super.getString(columnIndex);
+            }
+        };
+    }
+
+    private static String computeGenericName(Cursor cursor, Uri uri, boolean withExtension) {
+        String id = null;
+        try {
+            int idIdx = cursor.getColumnIndex("_id");
+            if (idIdx >= 0) {
+                id = cursor.getString(idIdx);
+            }
+        } catch (Throwable ignored) {}
+
+        if (id == null || id.isEmpty()) {
+            if (uri != null) {
+                id = uri.getLastPathSegment();
+            }
+        }
+        if (id == null || id.isEmpty()) {
+            try {
+                id = String.valueOf(cursor.getPosition());
+            } catch (Throwable ignored) {
+                id = "1";
+            }
+        }
+
+        String prefix = "image";
+        String mime = null;
+        try {
+            int mimeIdx = cursor.getColumnIndex("mime_type");
+            if (mimeIdx >= 0) {
+                mime = cursor.getString(mimeIdx);
+                if (mime != null && mime.startsWith("video/")) {
+                    prefix = "video";
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        if (!withExtension) {
+            return prefix + "_" + id;
+        }
+
+        String ext = null;
+        try {
+            int nameIdx = cursor.getColumnIndex("_display_name");
+            if (nameIdx >= 0) {
+                String origName = cursor.getString(nameIdx);
+                if (origName != null) {
+                    int dot = origName.lastIndexOf('.');
+                    if (dot >= 0 && dot < origName.length() - 1) {
+                        ext = origName.substring(dot + 1).toLowerCase();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        if (ext == null || ext.isEmpty()) {
+            if (mime != null) {
+                String fromMime = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime);
+                if (fromMime != null && !fromMime.isEmpty()) {
+                    ext = fromMime.toLowerCase();
+                } else if ("image/jpeg".equalsIgnoreCase(mime)) {
+                    ext = "jpg";
+                } else if ("image/png".equalsIgnoreCase(mime)) {
+                    ext = "png";
+                } else if ("image/webp".equalsIgnoreCase(mime)) {
+                    ext = "webp";
+                } else if ("video/mp4".equalsIgnoreCase(mime)) {
+                    ext = "mp4";
+                }
+            }
+        }
+
+        if (ext == null || ext.isEmpty()) {
+            ext = "image".equals(prefix) ? "jpg" : "mp4";
+        }
+
+        return prefix + "_" + id + "." + ext;
+    }
+
+    private static long[] getExtraSensitiveExifRanges(FileInputStream fis, String mimeType) {
+        if (mimeType == null || !ExifInterface.isSupportedMimeType(mimeType)) {
+            return null;
+        }
+        try {
+            FileDescriptor fd = fis.getFD();
+            if (fd == null || !fd.valid()) return null;
+
+            ExifInterface ex = new ExifInterface(fd);
+            List<Long> ranges = new ArrayList<Long>();
+            for (String tag : EXTRA_SENSITIVE_EXIF_TAGS) {
+                long[] r = ex.getAttributeRange(tag);
+                if (r != null && r.length == 2 && r[1] > 0) {
+                    ranges.add(r[0]);
+                    ranges.add(r[0] + r[1]);
+                }
+            }
+            if (ranges.isEmpty()) {
+                return null;
+            }
+            long[] result = new long[ranges.size()];
+            for (int i = 0; i < ranges.size(); i++) {
+                result[i] = ranges.get(i);
+            }
+            return result;
+        } catch (Throwable t) {
+            XposedBridge.log("[HyperFix] Error extracting extra sensitive EXIF ranges: " + t.getMessage());
+            return null;
         }
     }
 }
