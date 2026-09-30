@@ -1122,6 +1122,33 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking ContextKt.getContentResolverForUser$default: " + t.getMessage());
             }
 
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.photopicker.core.user.UserMonitor",
+                    lpparam.classLoader,
+                    "getContentResolver",
+                    Context.class,
+                    UserHandle.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            UserHandle uh = (UserHandle) param.args[1];
+                            if (uh != null) {
+                                int uhId = ((Integer) XposedHelpers.callMethod(uh, "getIdentifier")).intValue();
+                                if (uhId != 0) {
+                                    UserHandle systemUser = (UserHandle) XposedHelpers.getStaticObjectField(UserHandle.class, "SYSTEM");
+                                    param.args[1] = systemUser;
+                                    XposedBridge.log("[HyperFix] UserMonitor.getContentResolver redirected from u" + uhId + " to User 0");
+                                }
+                            }
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked UserMonitor.getContentResolver");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking UserMonitor.getContentResolver: " + t.getMessage());
+            }
+
             // B. Restore DocumentsUI for "Browse" / "More" instead of crashing with com.android.fileexplorer
             try {
                 XposedHelpers.findAndHookMethod(
