@@ -1,5 +1,6 @@
 package net.wastu.hyperfix;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.ComponentName;
 import android.content.pm.ActivityInfo;
@@ -355,21 +356,169 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking ActivityTaskManagerService: " + t.getMessage());
             }
 
-            // Fix China ROM reverting Power Button Gemini / Google Assistant to Restart Menu on Reboot
+            // Fix Cross-Profile Forwarding via IntentForwarderActivity (Discord -> Browser on User 0)
             try {
-                Class<?> shortcutObserverClass = XposedHelpers.findClassIfExists("com.android.server.policy.MiuiShortcutObserver", lpparam.classLoader);
-                if (shortcutObserverClass != null) {
+                Class<?> ifaClass = XposedHelpers.findClassIfExists("com.android.internal.app.IntentForwarderActivity", lpparam.classLoader);
+                if (ifaClass != null) {
                     try {
                         XposedHelpers.findAndHookMethod(
-                            shortcutObserverClass,
-                            "supportRSARegion",
-                            XC_MethodReplacement.returnConstant(true)
+                            ifaClass,
+                            "startActivityAsCaller",
+                            Intent.class,
+                            int.class,
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    Intent intent = (Intent) param.args[0];
+                                    int targetUserId = ((Integer) param.args[1]).intValue();
+                                    Activity activity = (Activity) param.thisObject;
+                                    try {
+                                        Intent launchIntent = new Intent(intent);
+                                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                        Object targetUserHandle = XposedHelpers.callStaticMethod(UserHandle.class, "of", targetUserId);
+                                        XposedHelpers.callMethod(activity, "startActivityAsUser", launchIntent, targetUserHandle);
+                                        XposedBridge.log("[HyperFix] IntentForwarderActivity forwarded intent to u" + targetUserId + ": " + launchIntent);
+                                        param.setResult(null);
+                                    } catch (Throwable t) {
+                                        XposedBridge.log("[HyperFix] Error in IntentForwarderActivity startActivityAsUser: " + t.getMessage());
+                                    }
+                                }
+                            }
                         );
-                        XposedBridge.log("[HyperFix] Hooked MiuiShortcutObserver.supportRSARegion -> true");
+                        XposedBridge.log("[HyperFix] Hooked IntentForwarderActivity.startActivityAsCaller(Intent, int)");
                     } catch (Throwable t) {
-                        XposedBridge.log("[HyperFix] Error hooking MiuiShortcutObserver.supportRSARegion: " + t.getMessage());
+                        XposedBridge.log("[HyperFix] Error hooking IntentForwarderActivity.startActivityAsCaller: " + t.getMessage());
+                    }
+                }
+
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        Activity.class,
+                        "startActivityAsCaller",
+                        Intent.class,
+                        android.os.Bundle.class,
+                        boolean.class,
+                        int.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                if (param.thisObject != null && param.thisObject.getClass().getName().contains("IntentForwarderActivity")) {
+                                    Intent intent = (Intent) param.args[0];
+                                    int targetUserId = ((Integer) param.args[3]).intValue();
+                                    Activity activity = (Activity) param.thisObject;
+                                    try {
+                                        Intent launchIntent = new Intent(intent);
+                                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                        Object targetUserHandle = XposedHelpers.callStaticMethod(UserHandle.class, "of", targetUserId);
+                                        XposedHelpers.callMethod(activity, "startActivityAsUser", launchIntent, targetUserHandle);
+                                        XposedBridge.log("[HyperFix] Activity.startActivityAsCaller intercepted for " + param.thisObject.getClass().getName() + " -> u" + targetUserId);
+                                        param.setResult(null);
+                                    } catch (Throwable t) {
+                                        XposedBridge.log("[HyperFix] Error in Activity.startActivityAsCaller hook: " + t.getMessage());
+                                    }
+                                }
+                            }
+                        }
+                    );
+                    XposedBridge.log("[HyperFix] Hooked Activity.startActivityAsCaller");
+                } catch (Throwable t) {
+                    XposedBridge.log("[HyperFix] Error hooking Activity.startActivityAsCaller: " + t.getMessage());
+                }
+
+                Class<?> arClass = XposedHelpers.findClassIfExists("com.android.server.wm.ActivityRecord", lpparam.classLoader);
+                if (arClass != null) {
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            arClass,
+                            "isResolverOrChildActivity",
+                            new XC_MethodHook() {
+                                @Override
+                                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                    if (Boolean.TRUE.equals(param.getResult())) return;
+                                    Object component = XposedHelpers.getObjectField(param.thisObject, "mActivityComponent");
+                                    if (component instanceof ComponentName) {
+                                        String cls = ((ComponentName) component).getClassName();
+                                        if (cls != null && (cls.contains("IntentForwarderActivity")
+                                                || cls.contains("ForwardIntentToParent")
+                                                || cls.contains("ForwardIntentToManagedProfile"))) {
+                                            param.setResult(true);
+                                        }
+                                    }
+                                }
+                            }
+                        );
+                        XposedBridge.log("[HyperFix] Hooked ActivityRecord.isResolverOrChildActivity");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking ActivityRecord.isResolverOrChildActivity: " + t.getMessage());
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error applying IntentForwarderActivity hooks: " + t.getMessage());
+            }
+
+            // Fix China ROM reverting Power Button Gemini / Google Assistant to Restart Menu on Reboot
+            try {
+                Class<?> powerKeyRuleClass = XposedHelpers.findClassIfExists("com.android.server.input.shortcut.singlekeyrule.PowerKeyRule", lpparam.classLoader);
+                if (powerKeyRuleClass != null) {
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            powerKeyRuleClass,
+                            "isSupportRsa",
+                            XC_MethodReplacement.returnConstant(false)
+                        );
+                        XposedBridge.log("[HyperFix] Hooked PowerKeyRule.isSupportRsa -> false");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking PowerKeyRule.isSupportRsa: " + t.getMessage());
                     }
 
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            powerKeyRuleClass,
+                            "postTriggerPowerGuide",
+                            String.class,
+                            String.class,
+                            XC_MethodReplacement.returnConstant(false)
+                        );
+                        XposedBridge.log("[HyperFix] Hooked PowerKeyRule.postTriggerPowerGuide -> false");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking PowerKeyRule.postTriggerPowerGuide: " + t.getMessage());
+                    }
+
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            powerKeyRuleClass,
+                            "triggerLongPress",
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    try {
+                                        String function = (String) XposedHelpers.callMethod(param.thisObject, "getFunction", "long_press_power_key");
+                                        if ("launch_google_search".equals(function)) {
+                                            boolean intercept = (Boolean) XposedHelpers.callMethod(
+                                                param.thisObject,
+                                                "postTriggerFunction",
+                                                "long_press_power_key",
+                                                "launch_google_search",
+                                                null,
+                                                true
+                                            );
+                                            XposedBridge.log("[HyperFix] PowerKeyRule.triggerLongPress dispatched launch_google_search: " + intercept);
+                                            param.setResult(true);
+                                        }
+                                    } catch (Throwable t) {
+                                        XposedBridge.log("[HyperFix] Error in PowerKeyRule.triggerLongPress hook: " + t.getMessage());
+                                    }
+                                }
+                            }
+                        );
+                        XposedBridge.log("[HyperFix] Hooked PowerKeyRule.triggerLongPress");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking PowerKeyRule.triggerLongPress: " + t.getMessage());
+                    }
+                }
+
+                Class<?> shortcutObserverClass = XposedHelpers.findClassIfExists("com.android.server.policy.MiuiShortcutObserver", lpparam.classLoader);
+                if (shortcutObserverClass != null) {
                     try {
                         XposedHelpers.findAndHookMethod(
                             shortcutObserverClass,
@@ -476,17 +625,6 @@ public class MainHook implements IXposedHookLoadPackage {
 
                 Class<?> triggerHelperClass = XposedHelpers.findClassIfExists("com.android.server.policy.MiuiShortcutTriggerHelper", lpparam.classLoader);
                 if (triggerHelperClass != null) {
-                    try {
-                        XposedHelpers.findAndHookMethod(
-                            triggerHelperClass,
-                            "supportRSARegion",
-                            XC_MethodReplacement.returnConstant(true)
-                        );
-                        XposedBridge.log("[HyperFix] Hooked MiuiShortcutTriggerHelper.supportRSARegion -> true");
-                    } catch (Throwable t) {
-                        XposedBridge.log("[HyperFix] Error hooking MiuiShortcutTriggerHelper.supportRSARegion: " + t.getMessage());
-                    }
-
                     try {
                         XposedHelpers.findAndHookMethod(
                             triggerHelperClass,
