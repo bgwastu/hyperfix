@@ -248,6 +248,10 @@ public class MainHook implements IXposedHookLoadPackage {
                                         Intent queryIntent = new Intent(intent);
                                         queryIntent.setPackage(null);
                                         queryIntent.setComponent(null);
+                                        int qFlags = queryIntent.getFlags();
+                                        qFlags &= ~0x00000400; // FLAG_ACTIVITY_REQUIRE_NON_BROWSER
+                                        qFlags &= ~0x00000200; // FLAG_ACTIVITY_REQUIRE_DEFAULT
+                                        queryIntent.setFlags(qFlags);
                                         @SuppressWarnings("unchecked")
                                         List<ResolveInfo> list = (List<ResolveInfo>) XposedHelpers.callMethod(
                                             param.thisObject,
@@ -292,7 +296,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking ComputerEngine.canForwardTo: " + t.getMessage());
             }
 
-            // Fix Cross-Profile Browser Link Clicking (Discord setting pkg="android" for web links)
+            // Fix Cross-Profile Browser Link Clicking (Discord setting pkg="android" or REQUIRE_NON_BROWSER for web links)
             try {
                 Class<?> ceClass = XposedHelpers.findClass("com.android.server.pm.ComputerEngine", lpparam.classLoader);
                 for (java.lang.reflect.Method m : ceClass.getDeclaredMethods()) {
@@ -303,14 +307,23 @@ public class MainHook implements IXposedHookLoadPackage {
                                 if (param.args.length > 0 && param.args[0] instanceof Intent) {
                                     Intent intent = (Intent) param.args[0];
                                     if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction()) && isWebIntent(intent)) {
-                                        if ("android".equals(intent.getPackage())) {
+                                        ComponentName cn = intent.getComponent();
+                                        boolean isForwarderComponent = cn != null && cn.getClassName() != null &&
+                                                (cn.getClassName().contains("ForwardIntent") || cn.getClassName().contains("IntentForwarder"));
+                                        if ("android".equals(intent.getPackage()) && !isForwarderComponent) {
                                             intent.setPackage(null);
                                             XposedBridge.log("[HyperFix] Stripped pkg='android' in queryIntentActivitiesInternal for web intent: " + intent);
                                         }
-                                        ComponentName cn = intent.getComponent();
-                                        if (cn != null && "android".equals(cn.getPackageName())) {
+                                        if (cn != null && "android".equals(cn.getPackageName()) && !isForwarderComponent) {
                                             intent.setComponent(null);
                                             XposedBridge.log("[HyperFix] Stripped component pkg='android' in queryIntentActivitiesInternal for web intent: " + intent);
+                                        }
+                                        int f = intent.getFlags();
+                                        if ((f & 0x00000400) != 0 || (f & 0x00000200) != 0) {
+                                            f &= ~0x00000400;
+                                            f &= ~0x00000200;
+                                            intent.setFlags(f);
+                                            XposedBridge.log("[HyperFix] Stripped REQUIRE_NON_BROWSER in queryIntentActivitiesInternal for web intent: " + intent);
                                         }
                                     }
                                 }
@@ -344,14 +357,27 @@ public class MainHook implements IXposedHookLoadPackage {
                                     }
                                 }
                                 if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction()) && isWebIntent(intent)) {
-                                    if ("android".equals(intent.getPackage())) {
+                                    ComponentName cn = intent.getComponent();
+                                    boolean isForwarderComponent = cn != null && cn.getClassName() != null &&
+                                            (cn.getClassName().contains("ForwardIntent") || cn.getClassName().contains("IntentForwarder"));
+                                    if ("android".equals(intent.getPackage()) && !isForwarderComponent) {
                                         intent.setPackage(null);
                                         XposedBridge.log("[HyperFix] Stripped pkg='android' in startActivity for web intent: " + intent);
                                     }
-                                    ComponentName cn = intent.getComponent();
-                                    if (cn != null && "android".equals(cn.getPackageName())) {
+                                    if (cn != null && "android".equals(cn.getPackageName()) && !isForwarderComponent) {
                                         intent.setComponent(null);
                                         XposedBridge.log("[HyperFix] Stripped component pkg='android' in startActivity for web intent: " + intent);
+                                    }
+                                    int f = intent.getFlags();
+                                    if ((f & 0x00000400) != 0 || (f & 0x00000200) != 0 || (f & Intent.FLAG_ACTIVITY_FORWARD_RESULT) != 0) {
+                                        f &= ~0x00000400;
+                                        f &= ~0x00000200;
+                                        f &= ~Intent.FLAG_ACTIVITY_FORWARD_RESULT;
+                                        f &= ~Intent.FLAG_ACTIVITY_PREVIOUS_IS_TOP;
+                                        f &= ~Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
+                                        f |= Intent.FLAG_ACTIVITY_NEW_TASK;
+                                        intent.setFlags(f);
+                                        XposedBridge.log("[HyperFix] Sanitized flags in startActivity for web intent: " + intent);
                                     }
                                 }
                                 break;
@@ -396,10 +422,19 @@ public class MainHook implements IXposedHookLoadPackage {
                                         XposedBridge.log("[HyperFix] ATMS.startActivityAsCaller intercepted for forwarder/web: " + intent + " to u" + targetUserId);
                                         Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
                                         if (context != null && intent != null) {
+                                            intent.setComponent(null);
+                                            intent.setPackage(null);
+
+                                            int flags = intent.getFlags();
+                                            flags &= ~0x00000400; // Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER
+                                            flags &= ~0x00000200; // Intent.FLAG_ACTIVITY_REQUIRE_DEFAULT
+                                            flags &= ~Intent.FLAG_ACTIVITY_FORWARD_RESULT; // 0x02000000
+                                            flags &= ~Intent.FLAG_ACTIVITY_PREVIOUS_IS_TOP; // 0x01000000
+                                            flags &= ~Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS; // 0x00800000
+                                            flags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+                                            intent.setFlags(flags);
+
                                             Intent launchIntent = new Intent(intent);
-                                            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                                            launchIntent.setComponent(null);
-                                            launchIntent.setPackage(null);
 
                                             int resolvedUserId = (targetUserId <= 0) ? 0 : targetUserId;
                                             Object userHandle = XposedHelpers.callStaticMethod(UserHandle.class, "of", resolvedUserId);
@@ -413,6 +448,14 @@ public class MainHook implements IXposedHookLoadPackage {
                                                 }
                                                 XposedBridge.log("[HyperFix] ATMS.startActivityAsCaller successfully launched intent into u" + resolvedUserId + ": " + launchIntent);
                                                 param.setResult(0); // ActivityManager.START_SUCCESS
+                                            } catch (Throwable t) {
+                                                XposedBridge.log("[HyperFix] Failed to launch with bOptions, retrying without: " + t.getMessage());
+                                                try {
+                                                    XposedHelpers.callMethod(context, "startActivityAsUser", launchIntent, userHandle);
+                                                    param.setResult(0);
+                                                } catch (Throwable t2) {
+                                                    XposedBridge.log("[HyperFix] Error in fallback startActivityAsUser: " + t2.getMessage());
+                                                }
                                             } finally {
                                                 Binder.restoreCallingIdentity(token);
                                             }
@@ -449,12 +492,24 @@ public class MainHook implements IXposedHookLoadPackage {
                                     }
                                     int targetUserId = ((Integer) param.args[1]).intValue();
                                     Activity activity = (Activity) param.thisObject;
+
+                                    intent.setComponent(null);
+                                    intent.setPackage(null);
+                                    int flags = intent.getFlags();
+                                    flags &= ~0x00000400; // REQUIRE_NON_BROWSER
+                                    flags &= ~0x00000200; // REQUIRE_DEFAULT
+                                    flags &= ~Intent.FLAG_ACTIVITY_FORWARD_RESULT; // 0x02000000
+                                    flags &= ~Intent.FLAG_ACTIVITY_PREVIOUS_IS_TOP; // 0x01000000
+                                    flags &= ~Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS; // 0x00800000
+                                    flags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+                                    intent.setFlags(flags);
+
                                     try {
                                         Intent launchIntent = new Intent(intent);
-                                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                                         Object targetUserHandle = XposedHelpers.callStaticMethod(UserHandle.class, "of", targetUserId);
                                         XposedHelpers.callMethod(activity, "startActivityAsUser", launchIntent, targetUserHandle);
                                         XposedBridge.log("[HyperFix] IntentForwarderActivity forwarded intent to u" + targetUserId + ": " + launchIntent);
+                                        activity.finish();
                                         param.setResult(null);
                                     } catch (Throwable t) {
                                         XposedBridge.log("[HyperFix] Error in IntentForwarderActivity startActivityAsUser: " + t.getMessage());
@@ -486,12 +541,24 @@ public class MainHook implements IXposedHookLoadPackage {
                                     }
                                     int targetUserId = ((Integer) param.args[3]).intValue();
                                     Activity activity = (Activity) param.thisObject;
+
+                                    intent.setComponent(null);
+                                    intent.setPackage(null);
+                                    int flags = intent.getFlags();
+                                    flags &= ~0x00000400; // REQUIRE_NON_BROWSER
+                                    flags &= ~0x00000200; // REQUIRE_DEFAULT
+                                    flags &= ~Intent.FLAG_ACTIVITY_FORWARD_RESULT; // 0x02000000
+                                    flags &= ~Intent.FLAG_ACTIVITY_PREVIOUS_IS_TOP; // 0x01000000
+                                    flags &= ~Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS; // 0x00800000
+                                    flags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+                                    intent.setFlags(flags);
+
                                     try {
                                         Intent launchIntent = new Intent(intent);
-                                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                                         Object targetUserHandle = XposedHelpers.callStaticMethod(UserHandle.class, "of", targetUserId);
                                         XposedHelpers.callMethod(activity, "startActivityAsUser", launchIntent, targetUserHandle);
                                         XposedBridge.log("[HyperFix] Activity.startActivityAsCaller intercepted for " + param.thisObject.getClass().getName() + " -> u" + targetUserId);
+                                        activity.finish();
                                         param.setResult(null);
                                     } catch (Throwable t) {
                                         XposedBridge.log("[HyperFix] Error in Activity.startActivityAsCaller hook: " + t.getMessage());
