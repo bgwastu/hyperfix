@@ -10,6 +10,7 @@ import android.net.Uri;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.ProviderInfo;
 import android.content.res.Resources;
 import android.graphics.drawable.Drawable;
 import android.os.UserManager;
@@ -334,6 +335,113 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Successfully hooked ComputerEngine.queryIntentActivitiesInternal for web links");
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking ComputerEngine.queryIntentActivitiesInternal: " + t.getMessage());
+            }
+
+            // Fix unexported ContentProvider resolution when caller holds a valid URI grant
+            // (fixes "Format not supported" when sharing statements/files from unexported providers like Bank Jago to Telegram/Discord)
+            try {
+                Class<?> ceClass = XposedHelpers.findClassIfExists("com.android.server.pm.ComputerEngine", lpparam.classLoader);
+                if (ceClass != null) {
+                    XposedHelpers.findAndHookMethod(
+                        ceClass,
+                        "resolveContentProvider",
+                        String.class,
+                        long.class,
+                        int.class,
+                        int.class,
+                        new XC_MethodHook() {
+                            private final ThreadLocal<Boolean> sResolving = new ThreadLocal<Boolean>() {
+                                @Override
+                                protected Boolean initialValue() {
+                                    return Boolean.FALSE;
+                                }
+                            };
+
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                if (param.getResult() != null) {
+                                    return;
+                                }
+                                if (Boolean.TRUE.equals(sResolving.get())) {
+                                    return;
+                                }
+
+                                int callingUid = ((Number) param.args[3]).intValue();
+                                if (callingUid < 10000) {
+                                    return;
+                                }
+
+                                String name = (String) param.args[0];
+                                if (name == null || name.isEmpty()) {
+                                    return;
+                                }
+
+                                long flags = ((Number) param.args[1]).longValue();
+                                int userId = ((Number) param.args[2]).intValue();
+
+                                sResolving.set(Boolean.TRUE);
+                                try {
+                                    // Attempt resolution as Process.SYSTEM_UID (1000) to bypass package visibility filtering
+                                    ProviderInfo pi = (ProviderInfo) XposedHelpers.callMethod(
+                                        param.thisObject,
+                                        "resolveContentProvider",
+                                        name,
+                                        flags,
+                                        userId,
+                                        1000
+                                    );
+
+                                    if (pi != null) {
+                                        // Verify caller actually holds a URI permission grant for this provider
+                                        Class<?> localServicesClass = XposedHelpers.findClassIfExists(
+                                            "com.android.server.LocalServices",
+                                            lpparam.classLoader
+                                        );
+                                        Class<?> ugmClass = XposedHelpers.findClassIfExists(
+                                            "com.android.server.uri.UriGrantsManagerInternal",
+                                            lpparam.classLoader
+                                        );
+                                        Object ugm = null;
+                                        if (localServicesClass != null && ugmClass != null) {
+                                            ugm = XposedHelpers.callStaticMethod(localServicesClass, "getService", ugmClass);
+                                        }
+                                        if (ugm == null && ugmClass != null) {
+                                            try {
+                                                Object injector = XposedHelpers.getObjectField(param.thisObject, "mInjector");
+                                                if (injector != null) {
+                                                    ugm = XposedHelpers.callMethod(injector, "getLocalService", ugmClass);
+                                                }
+                                            } catch (Throwable ignored) {}
+                                        }
+
+                                        if (ugm != null) {
+                                            boolean hasGrant = (Boolean) XposedHelpers.callMethod(
+                                                ugm,
+                                                "checkAuthorityGrants",
+                                                callingUid,
+                                                pi,
+                                                userId,
+                                                false
+                                            );
+                                            if (hasGrant) {
+                                                XposedBridge.log("[HyperFix] Bypassed package visibility for ContentProvider '"
+                                                    + name + "' for uid=" + callingUid + " with valid URI grant");
+                                                param.setResult(pi);
+                                            }
+                                        }
+                                    }
+                                } catch (Throwable t) {
+                                    XposedBridge.log("[HyperFix] Error in resolveContentProvider grant check: " + t.getMessage());
+                                } finally {
+                                    sResolving.set(Boolean.FALSE);
+                                }
+                            }
+                        }
+                    );
+                    XposedBridge.log("[HyperFix] Successfully hooked ComputerEngine.resolveContentProvider");
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking ComputerEngine.resolveContentProvider: " + t.getMessage());
             }
 
             try {
