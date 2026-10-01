@@ -241,11 +241,14 @@ public class MainHook implements IXposedHookLoadPackage {
                                     String resolvedType = (String) param.args[1];
                                     long token = Binder.clearCallingIdentity();
                                     try {
+                                        Intent queryIntent = new Intent(intent);
+                                        queryIntent.setPackage(null);
+                                        queryIntent.setComponent(null);
                                         @SuppressWarnings("unchecked")
                                         List<ResolveInfo> list = (List<ResolveInfo>) XposedHelpers.callMethod(
                                             param.thisObject,
                                             "queryIntentActivitiesInternal",
-                                            intent,
+                                            queryIntent,
                                             resolvedType,
                                             65536L, // MATCH_DEFAULT_ONLY
                                             targetUserId
@@ -254,7 +257,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                             list = (List<ResolveInfo>) XposedHelpers.callMethod(
                                                 param.thisObject,
                                                 "queryIntentActivitiesInternal",
-                                                intent,
+                                                queryIntent,
                                                 resolvedType,
                                                 0L,
                                                 targetUserId
@@ -283,6 +286,262 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Successfully hooked ComputerEngine.canForwardTo");
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking ComputerEngine.canForwardTo: " + t.getMessage());
+            }
+
+            // Fix Cross-Profile Browser Link Clicking (Discord setting pkg="android" for web links)
+            try {
+                Class<?> ceClass = XposedHelpers.findClass("com.android.server.pm.ComputerEngine", lpparam.classLoader);
+                for (java.lang.reflect.Method m : ceClass.getDeclaredMethods()) {
+                    if ("queryIntentActivitiesInternal".equals(m.getName())) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                if (param.args.length > 0 && param.args[0] instanceof Intent) {
+                                    Intent intent = (Intent) param.args[0];
+                                    if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction()) && isWebIntent(intent)) {
+                                        if ("android".equals(intent.getPackage())) {
+                                            intent.setPackage(null);
+                                            XposedBridge.log("[HyperFix] Stripped pkg='android' in queryIntentActivitiesInternal for web intent: " + intent);
+                                        }
+                                        ComponentName cn = intent.getComponent();
+                                        if (cn != null && "android".equals(cn.getPackageName())) {
+                                            intent.setComponent(null);
+                                            XposedBridge.log("[HyperFix] Stripped component pkg='android' in queryIntentActivitiesInternal for web intent: " + intent);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                XposedBridge.log("[HyperFix] Successfully hooked ComputerEngine.queryIntentActivitiesInternal for web links");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking ComputerEngine.queryIntentActivitiesInternal: " + t.getMessage());
+            }
+
+            try {
+                Class<?> atmsClass = XposedHelpers.findClass("com.android.server.wm.ActivityTaskManagerService", lpparam.classLoader);
+                XC_MethodHook sanitizeWebIntentHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        for (Object arg : param.args) {
+                            if (arg instanceof Intent) {
+                                Intent intent = (Intent) arg;
+                                if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction()) && isWebIntent(intent)) {
+                                    if ("android".equals(intent.getPackage())) {
+                                        intent.setPackage(null);
+                                        XposedBridge.log("[HyperFix] Stripped pkg='android' in startActivity for web intent: " + intent);
+                                    }
+                                    ComponentName cn = intent.getComponent();
+                                    if (cn != null && "android".equals(cn.getPackageName())) {
+                                        intent.setComponent(null);
+                                        XposedBridge.log("[HyperFix] Stripped component pkg='android' in startActivity for web intent: " + intent);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                };
+
+                for (java.lang.reflect.Method m : atmsClass.getDeclaredMethods()) {
+                    if ("startActivityAsUser".equals(m.getName()) || "startActivity".equals(m.getName())) {
+                        XposedBridge.hookMethod(m, sanitizeWebIntentHook);
+                    }
+                }
+                XposedBridge.log("[HyperFix] Successfully hooked ActivityTaskManagerService for web links");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking ActivityTaskManagerService: " + t.getMessage());
+            }
+
+            // Fix China ROM reverting Power Button Gemini / Google Assistant to Restart Menu on Reboot
+            try {
+                Class<?> shortcutObserverClass = XposedHelpers.findClassIfExists("com.android.server.policy.MiuiShortcutObserver", lpparam.classLoader);
+                if (shortcutObserverClass != null) {
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            shortcutObserverClass,
+                            "supportRSARegion",
+                            XC_MethodReplacement.returnConstant(true)
+                        );
+                        XposedBridge.log("[HyperFix] Hooked MiuiShortcutObserver.supportRSARegion -> true");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking MiuiShortcutObserver.supportRSARegion: " + t.getMessage());
+                    }
+
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            shortcutObserverClass,
+                            "isFeasibleFunction",
+                            String.class,
+                            String.class,
+                            Context.class,
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    String function = (String) param.args[1];
+                                    if ("launch_google_search".equals(function)) {
+                                        param.setResult(true);
+                                    }
+                                }
+                            }
+                        );
+                        XposedBridge.log("[HyperFix] Hooked MiuiShortcutObserver.isFeasibleFunction for launch_google_search");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking MiuiShortcutObserver.isFeasibleFunction: " + t.getMessage());
+                    }
+
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            shortcutObserverClass,
+                            "hasCustomizedFunction",
+                            String.class,
+                            String.class,
+                            boolean.class,
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    String action = (String) param.args[0];
+                                    String function = (String) param.args[1];
+                                    if ("long_press_power_key".equals(action) && "launch_google_search".equals(function)) {
+                                        param.setResult(true);
+                                    }
+                                }
+                            }
+                        );
+                        XposedBridge.log("[HyperFix] Hooked MiuiShortcutObserver.hasCustomizedFunction for launch_google_search");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking MiuiShortcutObserver.hasCustomizedFunction: " + t.getMessage());
+                    }
+                }
+
+                Class<?> singleKeyObserverClass = XposedHelpers.findClassIfExists("com.android.server.policy.MiuiSingleKeyObserver", lpparam.classLoader);
+                if (singleKeyObserverClass != null) {
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            singleKeyObserverClass,
+                            "setDefaultFunction",
+                            boolean.class,
+                            new XC_MethodHook() {
+                                private String savedFunction = null;
+
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    try {
+                                        android.content.ContentResolver cr = (android.content.ContentResolver) XposedHelpers.getObjectField(param.thisObject, "mContentResolver");
+                                        int userId = XposedHelpers.getIntField(param.thisObject, "mCurrentUserId");
+                                        String current = (String) XposedHelpers.callStaticMethod(
+                                            android.provider.Settings.System.class,
+                                            "getStringForUser",
+                                            cr, "long_press_power_key", userId
+                                        );
+                                        if ("launch_google_search".equals(current)) {
+                                            savedFunction = current;
+                                        }
+                                    } catch (Throwable ignored) {}
+                                }
+
+                                @Override
+                                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                    if ("launch_google_search".equals(savedFunction)) {
+                                        try {
+                                            android.content.ContentResolver cr = (android.content.ContentResolver) XposedHelpers.getObjectField(param.thisObject, "mContentResolver");
+                                            int userId = XposedHelpers.getIntField(param.thisObject, "mCurrentUserId");
+                                            String current = (String) XposedHelpers.callStaticMethod(
+                                                android.provider.Settings.System.class,
+                                                "getStringForUser",
+                                                cr, "long_press_power_key", userId
+                                            );
+                                            if (!"launch_google_search".equals(current)) {
+                                                XposedHelpers.callStaticMethod(
+                                                    android.provider.Settings.System.class,
+                                                    "putStringForUser",
+                                                    cr, "long_press_power_key", "launch_google_search", userId
+                                                );
+                                                XposedBridge.log("[HyperFix] Restored long_press_power_key to launch_google_search");
+                                            }
+                                        } catch (Throwable ignored) {}
+                                        savedFunction = null;
+                                    }
+                                }
+                            }
+                        );
+                        XposedBridge.log("[HyperFix] Hooked MiuiSingleKeyObserver.setDefaultFunction to preserve launch_google_search");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking MiuiSingleKeyObserver.setDefaultFunction: " + t.getMessage());
+                    }
+                }
+
+                Class<?> triggerHelperClass = XposedHelpers.findClassIfExists("com.android.server.policy.MiuiShortcutTriggerHelper", lpparam.classLoader);
+                if (triggerHelperClass != null) {
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            triggerHelperClass,
+                            "supportRSARegion",
+                            XC_MethodReplacement.returnConstant(true)
+                        );
+                        XposedBridge.log("[HyperFix] Hooked MiuiShortcutTriggerHelper.supportRSARegion -> true");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking MiuiShortcutTriggerHelper.supportRSARegion: " + t.getMessage());
+                    }
+
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            triggerHelperClass,
+                            "shouldShowPowerPanel",
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    try {
+                                        android.content.ContentResolver cr = (android.content.ContentResolver) XposedHelpers.getObjectField(param.thisObject, "mContentResolver");
+                                        int userId = XposedHelpers.getIntField(param.thisObject, "mCurrentUserId");
+                                        String func = (String) XposedHelpers.callStaticMethod(
+                                            android.provider.Settings.System.class,
+                                            "getStringForUser",
+                                            cr, "long_press_power_key", userId
+                                        );
+                                        if ("launch_google_search".equals(func)) {
+                                            param.setResult(false);
+                                        }
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
+                        );
+                        XposedBridge.log("[HyperFix] Hooked MiuiShortcutTriggerHelper.shouldShowPowerPanel for launch_google_search");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking MiuiShortcutTriggerHelper.shouldShowPowerPanel: " + t.getMessage());
+                    }
+                }
+
+                Class<?> custHelperClass = XposedHelpers.findClassIfExists("com.android.server.policy.util.PolicyCustFeatureHelper", lpparam.classLoader);
+                if (custHelperClass != null) {
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            custHelperClass,
+                            "isUnSupportLaunchGoogleSearch",
+                            XC_MethodReplacement.returnConstant(false)
+                        );
+                        XposedBridge.log("[HyperFix] Hooked PolicyCustFeatureHelper.isUnSupportLaunchGoogleSearch -> false");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking PolicyCustFeatureHelper.isUnSupportLaunchGoogleSearch: " + t.getMessage());
+                    }
+                }
+
+                Class<?> phoneWmClass = XposedHelpers.findClassIfExists("com.android.server.policy.MiuiPhoneWindowManager", lpparam.classLoader);
+                if (phoneWmClass != null) {
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            phoneWmClass,
+                            "stopGoogleAssistantVoiceMonitoring",
+                            XC_MethodReplacement.returnConstant(true)
+                        );
+                        XposedBridge.log("[HyperFix] Hooked MiuiPhoneWindowManager.stopGoogleAssistantVoiceMonitoring -> true");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking MiuiPhoneWindowManager.stopGoogleAssistantVoiceMonitoring: " + t.getMessage());
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error applying power button assistant fix: " + t.getMessage());
             }
 
             // Force AOSP cgroup v2 cached apps freezer in CachedAppOptimizer
@@ -1048,6 +1307,14 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking HyperMainActivity.getHyperFilePickerName: " + t.getMessage());
             }
         }
+    }
+
+    private static boolean isWebIntent(Intent intent) {
+        if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())) return false;
+        Uri data = intent.getData();
+        if (data == null) return false;
+        String scheme = data.getScheme();
+        return "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
     }
 
     private static volatile long sLastToastTime = 0;
