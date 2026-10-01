@@ -380,7 +380,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                         }
                                     }
 
-                                    if (isForwarder || (intent != null && isWebIntent(intent))) {
+                                    if (intent != null && isWebIntent(intent)) {
                                         XposedBridge.log("[HyperFix] ATMS.startActivityAsCaller intercepted for forwarder/web: " + intent + " to u" + targetUserId);
                                         Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
                                         if (context != null && intent != null) {
@@ -432,6 +432,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                 @Override
                                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                                     Intent intent = (Intent) param.args[0];
+                                    if (!isWebIntent(intent)) {
+                                        return;
+                                    }
                                     int targetUserId = ((Integer) param.args[1]).intValue();
                                     Activity activity = (Activity) param.thisObject;
                                     try {
@@ -466,6 +469,9 @@ public class MainHook implements IXposedHookLoadPackage {
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                                 if (param.thisObject != null && param.thisObject.getClass().getName().contains("IntentForwarderActivity")) {
                                     Intent intent = (Intent) param.args[0];
+                                    if (!isWebIntent(intent)) {
+                                        return;
+                                    }
                                     int targetUserId = ((Integer) param.args[3]).intValue();
                                     Activity activity = (Activity) param.thisObject;
                                     try {
