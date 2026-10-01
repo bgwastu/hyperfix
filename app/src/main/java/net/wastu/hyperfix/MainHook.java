@@ -349,9 +349,69 @@ public class MainHook implements IXposedHookLoadPackage {
                 for (java.lang.reflect.Method m : atmsClass.getDeclaredMethods()) {
                     if ("startActivityAsUser".equals(m.getName()) || "startActivity".equals(m.getName())) {
                         XposedBridge.hookMethod(m, sanitizeWebIntentHook);
+                    } else if ("startActivityAsCaller".equals(m.getName())) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                try {
+                                    Intent intent = param.args.length > 2 && param.args[2] instanceof Intent ? (Intent) param.args[2] : null;
+                                    IBinder resultTo = param.args.length > 4 && param.args[4] instanceof IBinder ? (IBinder) param.args[4] : null;
+                                    Bundle bOptions = param.args.length > 9 && param.args[9] instanceof Bundle ? (Bundle) param.args[9] : null;
+                                    int targetUserId = param.args.length > 11 && param.args[11] instanceof Integer ? ((Integer) param.args[11]).intValue() : 0;
+
+                                    boolean isForwarder = false;
+                                    if (resultTo != null) {
+                                        Class<?> arClass = XposedHelpers.findClassIfExists("com.android.server.wm.ActivityRecord", lpparam.classLoader);
+                                        if (arClass != null) {
+                                            Object sourceRecord = XposedHelpers.callStaticMethod(arClass, "isInAnyTask", resultTo);
+                                            if (sourceRecord != null) {
+                                                Object component = XposedHelpers.getObjectField(sourceRecord, "mActivityComponent");
+                                                if (component instanceof ComponentName) {
+                                                    String cls = ((ComponentName) component).getClassName();
+                                                    if (cls != null && (cls.contains("IntentForwarderActivity")
+                                                            || cls.contains("ForwardIntentToParent")
+                                                            || cls.contains("ForwardIntentToManagedProfile"))) {
+                                                        isForwarder = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (isForwarder || (intent != null && isWebIntent(intent))) {
+                                        XposedBridge.log("[HyperFix] ATMS.startActivityAsCaller intercepted for forwarder/web: " + intent + " to u" + targetUserId);
+                                        Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                        if (context != null && intent != null) {
+                                            Intent launchIntent = new Intent(intent);
+                                            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                            launchIntent.setComponent(null);
+                                            launchIntent.setPackage(null);
+
+                                            int resolvedUserId = (targetUserId <= 0) ? 0 : targetUserId;
+                                            Object userHandle = XposedHelpers.callStaticMethod(UserHandle.class, "of", resolvedUserId);
+
+                                            long token = Binder.clearCallingIdentity();
+                                            try {
+                                                if (bOptions != null) {
+                                                    XposedHelpers.callMethod(context, "startActivityAsUser", launchIntent, bOptions, userHandle);
+                                                } else {
+                                                    XposedHelpers.callMethod(context, "startActivityAsUser", launchIntent, userHandle);
+                                                }
+                                                XposedBridge.log("[HyperFix] ATMS.startActivityAsCaller successfully launched intent into u" + resolvedUserId + ": " + launchIntent);
+                                                param.setResult(0); // ActivityManager.START_SUCCESS
+                                            } finally {
+                                                Binder.restoreCallingIdentity(token);
+                                            }
+                                        }
+                                    }
+                                } catch (Throwable t) {
+                                    XposedBridge.log("[HyperFix] Error in ATMS.startActivityAsCaller hook: " + t.getMessage());
+                                }
+                            }
+                        });
                     }
                 }
-                XposedBridge.log("[HyperFix] Successfully hooked ActivityTaskManagerService for web links");
+                XposedBridge.log("[HyperFix] Successfully hooked ActivityTaskManagerService for web links and startActivityAsCaller");
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking ActivityTaskManagerService: " + t.getMessage());
             }
