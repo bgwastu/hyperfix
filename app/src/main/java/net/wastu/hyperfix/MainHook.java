@@ -24,6 +24,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.widget.Toast;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
@@ -460,6 +461,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                                 );
                                                 XposedBridge.log("[HyperFix] Restored long_press_power_key to launch_google_search");
                                             }
+                                            android.provider.Settings.Global.putInt(cr, "power_button_long_press", 5);
                                         } catch (Throwable ignored) {}
                                         savedFunction = null;
                                     }
@@ -511,6 +513,30 @@ public class MainHook implements IXposedHookLoadPackage {
                     } catch (Throwable t) {
                         XposedBridge.log("[HyperFix] Error hooking MiuiShortcutTriggerHelper.shouldShowPowerPanel: " + t.getMessage());
                     }
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            triggerHelperClass,
+                            "setLongPressPowerBehavior",
+                            String.class,
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    String function = (String) param.args[0];
+                                    if ("launch_google_search".equals(function) || "launch_voice_assistant".equals(function)) {
+                                        Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                        if (context != null) {
+                                            android.provider.Settings.Global.putInt(context.getContentResolver(), "power_button_long_press", 5);
+                                            XposedBridge.log("[HyperFix] setLongPressPowerBehavior: set power_button_long_press=5 (Assistant)");
+                                        }
+                                        param.setResult(null);
+                                    }
+                                }
+                            }
+                        );
+                        XposedBridge.log("[HyperFix] Hooked MiuiShortcutTriggerHelper.setLongPressPowerBehavior");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking MiuiShortcutTriggerHelper.setLongPressPowerBehavior: " + t.getMessage());
+                    }
                 }
 
                 Class<?> custHelperClass = XposedHelpers.findClassIfExists("com.android.server.policy.util.PolicyCustFeatureHelper", lpparam.classLoader);
@@ -525,6 +551,17 @@ public class MainHook implements IXposedHookLoadPackage {
                     } catch (Throwable t) {
                         XposedBridge.log("[HyperFix] Error hooking PolicyCustFeatureHelper.isUnSupportLaunchGoogleSearch: " + t.getMessage());
                     }
+
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            custHelperClass,
+                            "isUnSupportGlobalPowerGuide",
+                            XC_MethodReplacement.returnConstant(false)
+                        );
+                        XposedBridge.log("[HyperFix] Hooked PolicyCustFeatureHelper.isUnSupportGlobalPowerGuide -> false");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking PolicyCustFeatureHelper.isUnSupportGlobalPowerGuide: " + t.getMessage());
+                    }
                 }
 
                 Class<?> phoneWmClass = XposedHelpers.findClassIfExists("com.android.server.policy.MiuiPhoneWindowManager", lpparam.classLoader);
@@ -538,6 +575,54 @@ public class MainHook implements IXposedHookLoadPackage {
                         XposedBridge.log("[HyperFix] Hooked MiuiPhoneWindowManager.stopGoogleAssistantVoiceMonitoring -> true");
                     } catch (Throwable t) {
                         XposedBridge.log("[HyperFix] Error hooking MiuiPhoneWindowManager.stopGoogleAssistantVoiceMonitoring: " + t.getMessage());
+                    }
+                }
+
+                Class<?> pwmClass = XposedHelpers.findClassIfExists("com.android.server.policy.PhoneWindowManager", lpparam.classLoader);
+                if (pwmClass != null) {
+                    try {
+                        XposedHelpers.findAndHookMethod(
+                            pwmClass,
+                            "getResolvedLongPressOnPowerBehavior",
+                            new XC_MethodHook() {
+                                @Override
+                                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                    int current = ((Integer) param.getResult()).intValue();
+                                    if (current == 0) {
+                                        Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                        if (context != null) {
+                                            String func = android.provider.Settings.System.getString(
+                                                context.getContentResolver(), "long_press_power_key"
+                                            );
+                                            if ("launch_google_search".equals(func) || "launch_voice_assistant".equals(func)) {
+                                                param.setResult(5); // LONG_PRESS_POWER_ASSISTANT
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        );
+                        XposedBridge.log("[HyperFix] Hooked PhoneWindowManager.getResolvedLongPressOnPowerBehavior");
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error hooking PhoneWindowManager.getResolvedLongPressOnPowerBehavior: " + t.getMessage());
+                    }
+
+                    try {
+                        for (Method m : pwmClass.getDeclaredMethods()) {
+                            if ("initSingleKeyGestureRules".equals(m.getName()) || "init".equals(m.getName())) {
+                                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                                    @Override
+                                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                        try {
+                                            XposedHelpers.setBooleanField(param.thisObject, "mSupportLongPressPowerWhenNonInteractive", true);
+                                            XposedBridge.log("[HyperFix] Set mSupportLongPressPowerWhenNonInteractive -> true");
+                                        } catch (Throwable ignored) {}
+                                    }
+                                });
+                            }
+                        }
+                    } catch (Throwable t) {
+                        XposedBridge.log("[HyperFix] Error enabling long press power when non-interactive: " + t.getMessage());
                     }
                 }
             } catch (Throwable t) {
