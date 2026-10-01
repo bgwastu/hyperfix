@@ -328,9 +328,21 @@ public class MainHook implements IXposedHookLoadPackage {
                 XC_MethodHook sanitizeWebIntentHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        for (Object arg : param.args) {
+                        for (int i = 0; i < param.args.length; i++) {
+                            Object arg = param.args[i];
                             if (arg instanceof Intent) {
                                 Intent intent = (Intent) arg;
+                                if (intent != null && "miui.intent.action.XMAN_SHARE_MANAGER".equals(intent.getAction())) {
+                                    Intent target = (Intent) intent.getParcelableExtra("android.intent.extra.INTENT");
+                                    if (target != null) {
+                                        String type = target.getType();
+                                        if (type == null || !type.startsWith("image/")) {
+                                            param.args[i] = target;
+                                            XposedBridge.log("[HyperFix] Bypassed SecurityShare for non-image share intent: " + target);
+                                            break;
+                                        }
+                                    }
+                                }
                                 if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction()) && isWebIntent(intent)) {
                                     if ("android".equals(intent.getPackage())) {
                                         intent.setPackage(null);
@@ -505,10 +517,13 @@ public class MainHook implements IXposedHookLoadPackage {
                                     if (Boolean.TRUE.equals(param.getResult())) return;
                                     Object component = XposedHelpers.getObjectField(param.thisObject, "mActivityComponent");
                                     if (component instanceof ComponentName) {
+                                        String pkg = ((ComponentName) component).getPackageName();
                                         String cls = ((ComponentName) component).getClassName();
-                                        if (cls != null && (cls.contains("IntentForwarderActivity")
+                                        if (("com.android.intentresolver".equals(pkg)
+                                                && (cls.contains("ChooserActivity") || cls.contains("ResolverActivity")))
+                                                || (cls != null && (cls.contains("IntentForwarderActivity")
                                                 || cls.contains("ForwardIntentToParent")
-                                                || cls.contains("ForwardIntentToManagedProfile"))) {
+                                                || cls.contains("ForwardIntentToManagedProfile")))) {
                                             param.setResult(true);
                                         }
                                     }
@@ -522,6 +537,38 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error applying IntentForwarderActivity hooks: " + t.getMessage());
+            }
+
+            // Bypass Xiaomi Security Share for non-image files (prevent PDF sharing drops)
+            try {
+                Class<?> secShareClass = XposedHelpers.findClassIfExists("com.miui.securityshare.SecurityShareHelper", lpparam.classLoader);
+                if (secShareClass != null) {
+                    XposedHelpers.findAndHookMethod(
+                        secShareClass,
+                        "checkStartShareActivity",
+                        Activity.class,
+                        Bundle.class,
+                        int.class,
+                        Intent.class,
+                        boolean.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                Intent targetIntent = (Intent) param.args[3];
+                                if (targetIntent != null) {
+                                    String type = targetIntent.getType();
+                                    if (type == null || !type.startsWith("image/")) {
+                                        param.setResult(false);
+                                        XposedBridge.log("[HyperFix] Prevented SecurityShare hijack for non-image share: " + targetIntent);
+                                    }
+                                }
+                            }
+                        }
+                    );
+                    XposedBridge.log("[HyperFix] Successfully hooked SecurityShareHelper.checkStartShareActivity");
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking SecurityShareHelper: " + t.getMessage());
             }
 
             // Fix China ROM reverting Power Button Gemini / Google Assistant to Restart Menu on Reboot
