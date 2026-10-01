@@ -1592,6 +1592,175 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking HyperMainActivity.getHyperFilePickerName: " + t.getMessage());
             }
         }
+
+        // 7. Fix AirPods Pro "Show in Find Device" in Settings
+        if ("com.android.settings".equals(lpparam.packageName) || "com.xiaomi.bluetooth".equals(lpparam.packageName)) {
+            hookSettingsFindDevice(lpparam);
+        }
+    }
+
+    private static volatile boolean sFindDeviceJumpHelperHooked = false;
+    private static volatile boolean sFindHeadsetHooked = false;
+
+    private static Intent resolveFindDeviceIntent(Context context) {
+        if (context == null) return null;
+        PackageManager pm = context.getPackageManager();
+        if (pm == null) return null;
+
+        // 1. Try Xiaomi Find Device Main Activity (com.xiaomi.finddevice.FINDDEVICE_MAIN)
+        Intent miMain = new Intent("com.xiaomi.finddevice.FINDDEVICE_MAIN");
+        miMain.setPackage("com.xiaomi.finddevice");
+        miMain.putExtra("intent_source", "source_channel_bluetooth");
+        if (miMain.resolveActivity(pm) != null) {
+            return miMain;
+        }
+
+        // 2. Try Xiaomi Find Device Status Activity (com.xiaomi.finddevice.FINDDEVICE_STATUS)
+        Intent miStatus = new Intent("com.xiaomi.finddevice.FINDDEVICE_STATUS");
+        miStatus.setPackage("com.xiaomi.finddevice");
+        if (miStatus.resolveActivity(pm) != null) {
+            return miStatus;
+        }
+
+        // 3. Try Xiaomi Find Device Launch Intent
+        Intent miLaunch = pm.getLaunchIntentForPackage("com.xiaomi.finddevice");
+        if (miLaunch != null) {
+            return miLaunch;
+        }
+
+        // 4. Try Google Find My Device (com.google.android.apps.adm)
+        Intent googleLaunch = pm.getLaunchIntentForPackage("com.google.android.apps.adm");
+        if (googleLaunch != null) {
+            return googleLaunch;
+        }
+
+        // 5. Try legacy action SHARE_LOCATION_ENTRANCE
+        Intent action2 = new Intent("com.xiaomi.action.SHARE_LOCATION_ENTRANCE");
+        if (action2.resolveActivity(pm) != null) {
+            return action2;
+        }
+
+        return null;
+    }
+
+    private static synchronized void tryHookFindDeviceClasses(ClassLoader classLoader) {
+        if (!sFindDeviceJumpHelperHooked) {
+            Class<?> helperClass = XposedHelpers.findClassIfExists("plugin.settings.java.offline.FindDeviceJumpHelper", classLoader);
+            if (helperClass != null) {
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        helperClass,
+                        "getFindDeviceIntent",
+                        Context.class,
+                        new XC_MethodReplacement() {
+                            @Override
+                            protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+                                Context ctx = (Context) param.args[0];
+                                Intent resolved = resolveFindDeviceIntent(ctx);
+                                XposedBridge.log("[HyperFix] FindDeviceJumpHelper.getFindDeviceIntent intercepted -> " + resolved);
+                                return resolved;
+                            }
+                        }
+                    );
+                    XposedHelpers.findAndHookMethod(
+                        helperClass,
+                        "isNeedShowFindDeviceEntrance",
+                        Context.class,
+                        new XC_MethodReplacement() {
+                            @Override
+                            protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+                                Context ctx = (Context) param.args[0];
+                                return resolveFindDeviceIntent(ctx) != null;
+                            }
+                        }
+                    );
+                    sFindDeviceJumpHelperHooked = true;
+                    XposedBridge.log("[HyperFix] Successfully hooked FindDeviceJumpHelper");
+                } catch (Throwable t) {
+                    XposedBridge.log("[HyperFix] Error hooking FindDeviceJumpHelper: " + t.getMessage());
+                }
+            }
+        }
+
+        if (!sFindHeadsetHooked) {
+            Class<?> headsetClass = XposedHelpers.findClassIfExists("plugin.settings.java.offline.FindHeadset", classLoader);
+            if (headsetClass != null) {
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        headsetClass,
+                        "startFindDeviceMainActivity",
+                        Context.class,
+                        String.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                Context ctx = (Context) param.args[0];
+                                String mac = (String) param.args[1];
+                                XposedBridge.log("[HyperFix] FindHeadset.startFindDeviceMainActivity called for MAC: " + mac);
+                                if (ctx != null) {
+                                    Intent intent = resolveFindDeviceIntent(ctx);
+                                    if (intent != null) {
+                                        Intent target = new Intent(intent);
+                                        if (mac != null) {
+                                            target.putExtra("mac", mac);
+                                        }
+                                        target.addCategory(Intent.CATEGORY_DEFAULT);
+                                        target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                        try {
+                                            ctx.startActivity(target);
+                                            XposedBridge.log("[HyperFix] Successfully started Find Device activity: " + target);
+                                            param.setResult(null); // Short-circuit original method to avoid NPE
+                                        } catch (Throwable t) {
+                                            XposedBridge.log("[HyperFix] Failed starting Find Device activity: " + t.getMessage());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    );
+                    sFindHeadsetHooked = true;
+                    XposedBridge.log("[HyperFix] Successfully hooked FindHeadset.startFindDeviceMainActivity");
+                } catch (Throwable t) {
+                    XposedBridge.log("[HyperFix] Error hooking FindHeadset: " + t.getMessage());
+                }
+            }
+        }
+    }
+
+    private void hookSettingsFindDevice(final LoadPackageParam lpparam) {
+        XposedBridge.log("[HyperFix] Setting up hooks in " + lpparam.packageName + " for Find Device");
+
+        // 1. Try immediately in case class is already loaded
+        tryHookFindDeviceClasses(lpparam.classLoader);
+
+        // 2. Hook ClassLoader to catch dynamic split loading by Qigsaw
+        try {
+            XC_MethodHook loadClassHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    if (sFindDeviceJumpHelperHooked && sFindHeadsetHooked) {
+                        return;
+                    }
+                    String className = (String) param.args[0];
+                    if (className != null && className.startsWith("plugin.settings.java.offline.")) {
+                        Class<?> clazz = (Class<?>) param.getResult();
+                        if (clazz != null && clazz.getClassLoader() != null) {
+                            tryHookFindDeviceClasses(clazz.getClassLoader());
+                        }
+                    }
+                }
+            };
+
+            XposedHelpers.findAndHookMethod(
+                ClassLoader.class,
+                "loadClass",
+                String.class,
+                boolean.class,
+                loadClassHook
+            );
+        } catch (Throwable t) {
+            XposedBridge.log("[HyperFix] Error hooking ClassLoader.loadClass in " + lpparam.packageName + ": " + t.getMessage());
+        }
     }
 
     private static boolean isWebIntent(Intent intent) {
