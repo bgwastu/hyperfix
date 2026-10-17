@@ -1738,43 +1738,67 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Error hooking LegacyActivityStarterInternalImpl: " + t.getMessage());
             }
 
-            // E. Permanently disable all Smart Replies & Smart Actions in Notification Shade
+            // E. Permanently disable all Smart Replies & Smart Actions in Notification Shade via Application ClassLoader
             try {
                 XposedHelpers.findAndHookMethod(
-                    "com.android.systemui.statusbar.policy.SmartReplyStateInflaterKt",
+                    "android.app.Application",
                     lpparam.classLoader,
-                    "shouldShowSmartReplyView",
-                    "com.android.systemui.statusbar.notification.collection.NotificationEntry",
-                    "com.android.systemui.statusbar.policy.InflatedSmartReplyState",
-                    new XC_MethodReplacement() {
-                        @Override
-                        protected Object replaceHookedMethod(MethodHookParam param) {
-                            return false;
-                        }
-                    }
-                );
-                XposedBridge.log("[HyperFix] Successfully hooked SmartReplyStateInflaterKt.shouldShowSmartReplyView -> false");
-            } catch (Throwable t) {
-                XposedBridge.log("[HyperFix] Error hooking SmartReplyStateInflaterKt: " + t.getMessage());
-            }
-
-            try {
-                XposedHelpers.findAndHookMethod(
-                    "com.android.systemui.statusbar.policy.SmartReplyConstants",
-                    lpparam.classLoader,
-                    "updateConstants",
+                    "onCreate",
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             try {
-                                XposedHelpers.setBooleanField(param.thisObject, "mEnabled", false);
-                            } catch (Throwable ignored) {}
+                                Context appCtx = (Context) param.thisObject;
+                                ClassLoader appCl = appCtx.getClassLoader();
+                                XposedBridge.log("[HyperFix] Got MiuiSystemUI Application ClassLoader: " + appCl);
+
+                                // 1. Disable shouldShowSmartReplyView
+                                try {
+                                    XposedHelpers.findAndHookMethod(
+                                        "com.android.systemui.statusbar.policy.SmartReplyStateInflaterKt",
+                                        appCl,
+                                        "shouldShowSmartReplyView",
+                                        "com.android.systemui.statusbar.notification.collection.NotificationEntry",
+                                        "com.android.systemui.statusbar.policy.InflatedSmartReplyState",
+                                        new XC_MethodReplacement() {
+                                            @Override
+                                            protected Object replaceHookedMethod(MethodHookParam p) {
+                                                return false;
+                                            }
+                                        }
+                                    );
+                                    XposedBridge.log("[HyperFix] Successfully hooked SmartReplyStateInflaterKt.shouldShowSmartReplyView -> false");
+                                } catch (Throwable t) {
+                                    XposedBridge.log("[HyperFix] Error hooking SmartReplyStateInflaterKt on appCl: " + t.getMessage());
+                                }
+
+                                // 2. Force SmartReplyConstants.mEnabled = false
+                                try {
+                                    XposedHelpers.findAndHookMethod(
+                                        "com.android.systemui.statusbar.policy.SmartReplyConstants",
+                                        appCl,
+                                        "updateConstants",
+                                        new XC_MethodHook() {
+                                            @Override
+                                            protected void afterHookedMethod(MethodHookParam p) {
+                                                try {
+                                                    XposedHelpers.setBooleanField(p.thisObject, "mEnabled", false);
+                                                } catch (Throwable ignored) {}
+                                            }
+                                        }
+                                    );
+                                    XposedBridge.log("[HyperFix] Successfully hooked SmartReplyConstants.updateConstants -> mEnabled=false");
+                                } catch (Throwable t) {
+                                    XposedBridge.log("[HyperFix] Error hooking SmartReplyConstants on appCl: " + t.getMessage());
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log("[HyperFix] Error in Application.onCreate hook: " + t.getMessage());
+                            }
                         }
                     }
                 );
-                XposedBridge.log("[HyperFix] Successfully hooked SmartReplyConstants.updateConstants -> mEnabled=false");
             } catch (Throwable t) {
-                XposedBridge.log("[HyperFix] Error hooking SmartReplyConstants: " + t.getMessage());
+                XposedBridge.log("[HyperFix] Error hooking Application.onCreate in SystemUI: " + t.getMessage());
             }
         }
 
