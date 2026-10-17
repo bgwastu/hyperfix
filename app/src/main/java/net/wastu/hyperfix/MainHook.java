@@ -1737,6 +1737,45 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking LegacyActivityStarterInternalImpl: " + t.getMessage());
             }
+
+            // E. Permanently disable all Smart Replies & Smart Actions in Notification Shade
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.systemui.statusbar.policy.SmartReplyStateInflaterKt",
+                    lpparam.classLoader,
+                    "shouldShowSmartReplyView",
+                    "com.android.systemui.statusbar.notification.collection.NotificationEntry",
+                    "com.android.systemui.statusbar.policy.InflatedSmartReplyState",
+                    new XC_MethodReplacement() {
+                        @Override
+                        protected Object replaceHookedMethod(MethodHookParam param) {
+                            return false;
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked SmartReplyStateInflaterKt.shouldShowSmartReplyView -> false");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking SmartReplyStateInflaterKt: " + t.getMessage());
+            }
+
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.android.systemui.statusbar.policy.SmartReplyConstants",
+                    lpparam.classLoader,
+                    "updateConstants",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                XposedHelpers.setBooleanField(param.thisObject, "mEnabled", false);
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                );
+                XposedBridge.log("[HyperFix] Successfully hooked SmartReplyConstants.updateConstants -> mEnabled=false");
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking SmartReplyConstants: " + t.getMessage());
+            }
         }
 
         // 6. Fix Cross-User / Work Profile Photo Picker in com.android.photopicker
