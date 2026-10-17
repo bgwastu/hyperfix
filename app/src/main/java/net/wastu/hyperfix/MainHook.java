@@ -227,10 +227,21 @@ public class MainHook implements IXposedHookLoadPackage {
                     int.class,
                     int.class,
                     new XC_MethodHook() {
+                        private final ThreadLocal<Boolean> sCheckingForward = new ThreadLocal<Boolean>() {
+                            @Override
+                            protected Boolean initialValue() {
+                                return Boolean.FALSE;
+                            }
+                        };
+
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             boolean original = ((Boolean) param.getResult()).booleanValue();
                             if (original) return; // already allowed
+
+                            if (Boolean.TRUE.equals(sCheckingForward.get())) {
+                                return;
+                            }
 
                             int sourceUserId = ((Integer) param.args[2]).intValue();
                             int targetUserId = ((Integer) param.args[3]).intValue();
@@ -243,16 +254,42 @@ public class MainHook implements IXposedHookLoadPackage {
                                 )).booleanValue();
                                 if (sameProfile) {
                                     Intent intent = (Intent) param.args[0];
+                                    if (intent == null) return;
+
+                                    // For chooser intents, unpack the actual intent being shared
+                                    Intent actualIntent = intent;
+                                    if (Intent.ACTION_CHOOSER.equals(intent.getAction())) {
+                                        Intent extra = (Intent) intent.getParcelableExtra(Intent.EXTRA_INTENT);
+                                        if (extra != null) {
+                                            actualIntent = extra;
+                                        }
+                                    }
+
                                     String resolvedType = (String) param.args[1];
+                                    if (resolvedType == null || resolvedType.isEmpty()) {
+                                        resolvedType = actualIntent.getType();
+                                    }
+                                    if ((resolvedType == null || resolvedType.isEmpty()) && actualIntent.getData() != null) {
+                                        try {
+                                            Context context = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
+                                            if (context != null) {
+                                                resolvedType = actualIntent.resolveTypeIfNeeded(context.getContentResolver());
+                                            }
+                                        } catch (Throwable ignored) {}
+                                    }
+
+                                    Intent queryIntent = new Intent(actualIntent);
+                                    queryIntent.setPackage(null);
+                                    queryIntent.setComponent(null);
+                                    queryIntent.setSelector(null);
+                                    int qFlags = queryIntent.getFlags();
+                                    qFlags &= ~0x00000400; // FLAG_ACTIVITY_REQUIRE_NON_BROWSER
+                                    qFlags &= ~0x00000200; // FLAG_ACTIVITY_REQUIRE_DEFAULT
+                                    queryIntent.setFlags(qFlags);
+
+                                    sCheckingForward.set(Boolean.TRUE);
                                     long token = Binder.clearCallingIdentity();
                                     try {
-                                        Intent queryIntent = new Intent(intent);
-                                        queryIntent.setPackage(null);
-                                        queryIntent.setComponent(null);
-                                        int qFlags = queryIntent.getFlags();
-                                        qFlags &= ~0x00000400; // FLAG_ACTIVITY_REQUIRE_NON_BROWSER
-                                        qFlags &= ~0x00000200; // FLAG_ACTIVITY_REQUIRE_DEFAULT
-                                        queryIntent.setFlags(qFlags);
                                         @SuppressWarnings("unchecked")
                                         List<ResolveInfo> list = (List<ResolveInfo>) XposedHelpers.callMethod(
                                             param.thisObject,
@@ -272,11 +309,21 @@ public class MainHook implements IXposedHookLoadPackage {
                                                 targetUserId
                                             );
                                         }
+                                        if (list == null || list.isEmpty()) {
+                                            list = (List<ResolveInfo>) XposedHelpers.callMethod(
+                                                param.thisObject,
+                                                "queryIntentActivitiesInternal",
+                                                queryIntent,
+                                                resolvedType,
+                                                0x20000000L, // MATCH_ALL
+                                                targetUserId
+                                            );
+                                        }
                                         if (list != null) {
                                             for (ResolveInfo ri : list) {
                                                 if (ri.activityInfo != null && !"android".equals(ri.activityInfo.packageName)) {
                                                     XposedBridge.log("[HyperFix] canForwardTo enabled for profile group: u"
-                                                        + sourceUserId + " -> u" + targetUserId + " intent: " + intent);
+                                                        + sourceUserId + " -> u" + targetUserId + " intent: " + actualIntent);
                                                     param.setResult(true);
                                                     return;
                                                 }
@@ -286,6 +333,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                         XposedBridge.log("[HyperFix] Error checking queryIntentActivitiesInternal: " + t.getMessage());
                                     } finally {
                                         Binder.restoreCallingIdentity(token);
+                                        sCheckingForward.set(Boolean.FALSE);
                                     }
                                 }
                             }
@@ -453,17 +501,6 @@ public class MainHook implements IXposedHookLoadPackage {
                             Object arg = param.args[i];
                             if (arg instanceof Intent) {
                                 Intent intent = (Intent) arg;
-                                if (intent != null && "miui.intent.action.XMAN_SHARE_MANAGER".equals(intent.getAction())) {
-                                    Intent target = (Intent) intent.getParcelableExtra("android.intent.extra.INTENT");
-                                    if (target != null) {
-                                        String type = target.getType();
-                                        if (type == null || !type.startsWith("image/")) {
-                                            param.args[i] = target;
-                                            XposedBridge.log("[HyperFix] Bypassed SecurityShare for non-image share intent: " + target);
-                                            break;
-                                        }
-                                    }
-                                }
                                 if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction()) && isWebIntent(intent)) {
                                     ComponentName cn = intent.getComponent();
                                     boolean isForwarderComponent = cn != null && cn.getClassName() != null &&
@@ -1818,6 +1855,73 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[HyperFix] Successfully hooked HyperMainActivity.getHyperFilePickerName");
             } catch (Throwable t) {
                 XposedBridge.log("[HyperFix] Error hooking HyperMainActivity.getHyperFilePickerName: " + t.getMessage());
+            }
+        }
+
+        // Fix Share Sheet in com.android.intentresolver
+        if ("com.android.intentresolver".equals(lpparam.packageName)) {
+            try {
+                Class<?> miShareConnClass = XposedHelpers.findClassIfExists("com.miui.mishare.app.connect.MiShareConnectivity", lpparam.classLoader);
+                if (miShareConnClass != null) {
+                    XposedHelpers.findAndHookMethod(
+                        miShareConnClass,
+                        "startActivityForPermission",
+                        Bundle.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                Bundle b = (Bundle) param.args[0];
+                                if (b != null) {
+                                    try {
+                                        Object obj = b.get("android.intent.extra.INTENT");
+                                        if (obj != null && !(obj instanceof Intent)) {
+                                            XposedBridge.log("[HyperFix] Suppressed MiShare startActivityForPermission for non-Intent EXTRA_INTENT: " + obj.getClass().getName());
+                                            param.setResult(null);
+                                        }
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
+                        }
+                    );
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking MiShareConnectivity: " + t.getMessage());
+            }
+
+            try {
+                Class<?> secShareClass = XposedHelpers.findClassIfExists("com.miui.securityshare.SecurityShareHelper", lpparam.classLoader);
+                if (secShareClass != null) {
+                    XposedHelpers.findAndHookMethod(
+                        secShareClass,
+                        "checkStartShareActivity",
+                        Activity.class,
+                        Bundle.class,
+                        int.class,
+                        Intent.class,
+                        boolean.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                Intent targetIntent = (Intent) param.args[3];
+                                if (targetIntent != null) {
+                                    String type = targetIntent.getType();
+                                    if (type == null && param.args[0] instanceof Activity && targetIntent.getData() != null) {
+                                        try {
+                                            type = ((Activity) param.args[0]).getContentResolver().getType(targetIntent.getData());
+                                        } catch (Throwable ignored) {}
+                                    }
+                                    if (type == null || !type.startsWith("image/")) {
+                                        param.setResult(false);
+                                        XposedBridge.log("[HyperFix] Prevented SecurityShare hijack in intentresolver for non-image share: " + targetIntent);
+                                    }
+                                }
+                            }
+                        }
+                    );
+                    XposedBridge.log("[HyperFix] Hooked SecurityShareHelper.checkStartShareActivity in com.android.intentresolver");
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[HyperFix] Error hooking SecurityShareHelper in intentresolver: " + t.getMessage());
             }
         }
 
